@@ -13,13 +13,16 @@
 #       app/server/       <- 后端构建产物：
 #                            bin/            随包 aarch64 二进制 v2ray/mitmdump(下载缓存)
 #                            rayshark_server PyInstaller 单二进制(全量模式)
-#                            server.py + rayshark/*.py  同步自 server/ (回落 & mitm_addon)
+#                            rayshark/mitm_addon.py  mitmdump -s 磁盘加载所需的唯一 .py
 #     build*.sh  fetch_binaries.sh  .build-venv/  .pyi-build/  <- dev 工具，全在打包目录外
 #
 # 说明：
-#   - 后端源码只维护在 server/；构建时同步进 app/server/，从不手改 app/server 里的源码。
-#   - rayshark/mitm_addon.py 必须以 .py 形式随包(mitmdump 用 -s 磁盘加载，非 import)，
-#     所以无论二进制还是源码模式，都要把源码同步进包。
+#   - 后端源码只维护在 server/。
+#   - 【全量/二进制模式】包内 app/server 只放编译产物 rayshark_server + bin/ +
+#     rayshark/mitm_addon.py，不带其余后端源码。
+#   - 【SKIP_BACKEND=1 源码回落模式】无二进制、靠 NAS python3 跑 server.py，
+#     故此时才把 server.py + rayshark/*.py 全部源码同步进包。
+#   - rayshark/mitm_addon.py 无论哪种模式都以 .py 随包(mitmdump 用 -s 磁盘加载，非 import)。
 #
 # ⚠️ PyInstaller 后端二进制不能交叉编译：SKIP_BACKEND=1 时走「源码 + NAS python3」回落，
 #    mac 上也能出可用 fpk（前提：NAS 有含 gevent/flask 的 python3，或随后在 NAS 上
@@ -51,7 +54,7 @@ SKIP_BINARIES="${SKIP_BINARIES:-0}"
 [ -d "${PKG_DIR}" ]    || { echo "!! 未找到打包目录 ${PKG_DIR}" >&2; exit 1; }
 [ -d "${SRC_SERVER}" ] || { echo "!! 未找到后端源码目录 ${SRC_SERVER}" >&2; exit 1; }
 
-echo "==> [1/6] 随包二进制 (v2ray + mitmdump, aarch64)"
+echo "==> [1/5] 随包二进制 (v2ray + mitmdump, aarch64)"
 if [ "${SKIP_BINARIES}" != "1" ]; then
     ./fetch_binaries.sh
 else
@@ -65,7 +68,7 @@ for b in v2ray mitmdump; do
     [ "${magic}" = "7f454c46" ] || { echo "    !! ${p} 非 ELF (magic=${magic})，架构错误" >&2; exit 1; }
 done
 
-echo "==> [2/6] 前端构建 (Vue + Vite) -> app/ui"
+echo "==> [2/5] 前端构建 (Vue + Vite) -> app/ui"
 if [ "${SKIP_FRONTEND}" != "1" ]; then
     ( cd frontend && npm install && npm run build )
     echo "    清理旧 assets 并拷贝 dist -> app/ui（保留 images/config）"
@@ -76,19 +79,14 @@ else
     echo "    跳过前端"
 fi
 
-echo "==> [3/6] 同步后端源码 server/ -> app/server (保留 bin/)"
+echo "==> [3/5] 后端打包 -> app/server"
 mkdir -p "${PKG_SERVER}"
-cp "${SRC_SERVER}/server.py"        "${PKG_SERVER}/server.py"
-cp "${SRC_SERVER}/requirements.txt" "${PKG_SERVER}/requirements.txt"
+# 无论哪种模式，先清掉包内旧的后端源码/产物(bin/ 保留)，避免残留
 rm -rf "${PKG_SERVER}/rayshark"
-cp -r "${SRC_SERVER}/rayshark"      "${PKG_SERVER}/rayshark"
-# 清掉源码同步过程中可能带入的缓存
-find "${PKG_SERVER}/rayshark" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-find "${PKG_SERVER}/rayshark" -name '*.pyc' -delete 2>/dev/null || true
-echo "    源码已同步(server.py / requirements.txt / rayshark/，含 mitm_addon.py)"
+rm -f  "${PKG_SERVER}/server.py" "${PKG_SERVER}/requirements.txt" "${PKG_SERVER}/rayshark_server"
 
-echo "==> [4/6] 后端打包"
 if [ "${SKIP_BACKEND}" != "1" ]; then
+    # ---- 全量/二进制模式：包内只放编译产物 + mitm_addon.py ----
     ARCH="$(uname -m)"
     if [ "${ARCH}" != "aarch64" ] && [ "${ARCH}" != "arm64" ]; then
         echo "    !! 当前架构 ${ARCH} 非 aarch64，PyInstaller 产物无法在 NAS 运行。" >&2
@@ -113,18 +111,28 @@ if [ "${SKIP_BACKEND}" != "1" ]; then
     chmod +x "${PKG_SERVER}/rayshark_server"
     file "${PKG_SERVER}/rayshark_server" || true
     rm -rf "${PYI_WORK}"
+    # mitm_addon.py 必须以 .py 随包(mitmdump -s 磁盘加载，未冻进二进制)
+    mkdir -p "${PKG_SERVER}/rayshark"
+    cp "${SRC_SERVER}/rayshark/mitm_addon.py" "${PKG_SERVER}/rayshark/mitm_addon.py"
+    echo "    产物就绪：rayshark_server + bin/ + rayshark/mitm_addon.py（不含其余源码）"
 else
-    echo "    跳过 PyInstaller，随包源码 + NAS python3 回落（见 cmd/main find_python）"
-    rm -f "${PKG_SERVER}/rayshark_server" 2>/dev/null || true
+    # ---- 源码回落模式：无二进制，靠 NAS python3 跑 server.py，需全部源码 ----
+    echo "    SKIP_BACKEND=1：同步全部后端源码进包(NAS python3 回落跑 server.py)"
+    cp "${SRC_SERVER}/server.py"        "${PKG_SERVER}/server.py"
+    cp "${SRC_SERVER}/requirements.txt" "${PKG_SERVER}/requirements.txt"
+    cp -r "${SRC_SERVER}/rayshark"      "${PKG_SERVER}/rayshark"
+    find "${PKG_SERVER}/rayshark" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "${PKG_SERVER}/rayshark" -name '*.pyc' -delete 2>/dev/null || true
+    echo "    源码已同步(server.py / requirements.txt / rayshark/，含 mitm_addon.py)"
 fi
 
-echo "==> [5/6] 清理打包目录临时产物"
+echo "==> [4/5] 清理打包目录临时产物"
 find "${PKG_DIR}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "${PKG_DIR}" -name '.DS_Store' -delete 2>/dev/null || true
 find "${PKG_DIR}" -name '*.pyc' -delete 2>/dev/null || true
 rm -f "${PKG_DIR}/app.sock" "${PKG_DIR}"/*.fpk "${HERE}"/*.fpk 2>/dev/null || true
 
-echo "==> [6/6] fnpack build"
+echo "==> [5/5] fnpack build"
 # fnpack 只打包 --directory 指向的干净目录；产物落在当前工作目录(项目根)，
 # 从而打包目录始终只含输入、不含 fpk 产物。
 fnpack build --directory "${PKG_DIR}"

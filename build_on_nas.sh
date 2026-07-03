@@ -15,12 +15,15 @@
 #     frontend/                  <- 前端源码(dev)。build -> app/ui
 #     fnnas.rayshark/            <- 干净打包目录，只放 fpk 输入(manifest/config/
 #                                   cmd/wizard/icon/app)。fnpack 只扫描这里。
-#       app/server/              <- 后端构建产物：bin/(v2ray,mitmdump) +
-#                                   rayshark_server(冻结二进制) + 同步的源码
+#       app/server/              <- 后端构建产物(只放产物，不含源码)：
+#                                   rayshark_server(PyInstaller 冻结二进制) +
+#                                   bin/(v2ray,mitmdump) + rayshark/mitm_addon.py
 #     build*.sh  .build-venv/  .pyi-build/  <- dev 工具，全部在 fnnas.rayshark/ 之外
 #
-#   后端源码只维护在 server/；本脚本把它同步进 app/server/ 再 freeze，从不手改包内源码。
-#   rayshark/mitm_addon.py 必须以 .py 随包(mitmdump 用 -s 磁盘加载，非 import)。
+#   后端源码只维护在 server/；本脚本【直接从 server/ 冻结】，不把源码同步进包。
+#   包内 app/server 只含编译产物 rayshark_server + bin/；唯一例外是
+#   rayshark/mitm_addon.py —— 它被独立 mitmdump 进程用 -s 磁盘加载(非 import)，
+#   无法冻进二进制，故必须以单个 .py 随包。
 #
 # 用法（在飞牛 NAS 上，进入本项目根目录）：
 #   chmod +x build_on_nas.sh
@@ -160,15 +163,12 @@ else
 fi
 
 ###############################################################################
-info "==> [5/7] 同步后端源码 server/ -> app/server (保留 bin/)"
+info "==> [5/7] 准备后端产物目录 app/server (只保留 bin/，清掉旧源码/产物)"
 mkdir -p "${PKG_SERVER}"
-cp "${SRC_SERVER}/server.py"        "${PKG_SERVER}/server.py"
-cp "${SRC_SERVER}/requirements.txt" "${PKG_SERVER}/requirements.txt"
+# 包内只放编译产物：删掉可能残留的后端源码与旧二进制(bin/ 保留)
 rm -rf "${PKG_SERVER}/rayshark"
-cp -r "${SRC_SERVER}/rayshark"      "${PKG_SERVER}/rayshark"
-find "${PKG_SERVER}/rayshark" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-find "${PKG_SERVER}/rayshark" -name '*.pyc' -delete 2>/dev/null || true
-green "    源码已同步(server.py / requirements.txt / rayshark/，含 mitm_addon.py)"
+rm -f  "${PKG_SERVER}/server.py" "${PKG_SERVER}/requirements.txt" "${DIST_BIN}"
+green "    已清理(仅留 bin/)，后端将从 ${SRC_SERVER} 直接冻结"
 
 ###############################################################################
 info "==> [6/7] PyInstaller 冻结后端为 aarch64 单文件"
@@ -198,6 +198,11 @@ rm -rf "${PYI_WORK}"
 magic="$(head -c4 "${DIST_BIN}" | od -An -tx1 | tr -d ' \n')"
 [ "${magic}" = "7f454c46" ] || die "产物 ${DIST_BIN} 非 ELF(magic=${magic})"
 green "    后端二进制就绪: ${DIST_BIN} ($(du -h "${DIST_BIN}" | cut -f1))"
+
+# mitm_addon.py 必须以 .py 随包：mitmdump 用 -s 从磁盘加载，未冻进二进制
+mkdir -p "${PKG_SERVER}/rayshark"
+cp "${SRC_SERVER}/rayshark/mitm_addon.py" "${PKG_SERVER}/rayshark/mitm_addon.py"
+green "    已随包 mitm_addon.py (mitmdump -s 磁盘加载所需的唯一 .py)"
 
 # ---- 可选：冒烟自检(确认冻结产物真的能起来) ----
 if [ "${SMOKE}" = "1" ]; then
