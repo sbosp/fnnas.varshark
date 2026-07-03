@@ -1,0 +1,6 @@
+#!/bin/bash
+### 配置变更后回调（root 执行，用户在应用设置保存后触发）。
+### 授权文件夹等设置更新后，重启服务使其生效。
+"${TRIM_APPDEST}/../cmd/main" stop 2>/dev/null
+"${TRIM_APPDEST}/../cmd/main" start 2>/dev/null
+exit 0

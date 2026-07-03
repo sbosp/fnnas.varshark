@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Frontend build (源码产物，构建时才拷入 fnnas.rayshark/app/ui)
+frontend/dist/
+
+# 打包目录内的后端构建产物：源码只在顶层 server/ 维护，构建时同步进 app/server/。
+# 这些是产物、不入库；bin/(下载的 v2ray/mitmdump 缓存) 保留跟踪以加速打包。
+fnnas.rayshark/app/server/server.py
+fnnas.rayshark/app/server/requirements.txt
+fnnas.rayshark/app/server/rayshark/
+fnnas.rayshark/app/server/rayshark_server
+
+# 构建临时产物（都在打包目录之外）
+.build-venv/
+.pyi-build/
+
+# fnpack 产物
+*.fpk
+
+# PyInstaller
+*.spec
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime / logs
+*.log
+app.sock
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+tmp/
+temp/
+*.tmp

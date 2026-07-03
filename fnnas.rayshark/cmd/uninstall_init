@@ -1,0 +1,39 @@
+#!/bin/bash
+### 卸载前置（root 执行）：清理一切系统级副作用，保证干净卸载。
+###  1. 停服务（释放 socket / 子进程）
+###  2. 清理 iptables 自定义链 RAYSHARK_OUT（nat/OUTPUT 跳转 + flush + 删链）
+###  3. 从系统信任库移除 mitmproxy CA 并刷新
+###  4. 删除专用用户 rayshark
+set +e
+
+CHAIN="RAYSHARK_OUT"
+
+# 1. 停服务
+if [ -n "${TRIM_APPDEST}" ] && [ -x "${TRIM_APPDEST}/../cmd/main" ]; then
+    "${TRIM_APPDEST}/../cmd/main" stop 2>/dev/null
+fi
+
+# 2. iptables 干净回滚
+if command -v iptables >/dev/null 2>&1; then
+    # 删 OUTPUT 中所有指向本链的跳转
+    for _ in 1 2 3 4 5; do
+        iptables -t nat -D OUTPUT -p tcp -j "${CHAIN}" 2>/dev/null || break
+    done
+    iptables -t nat -F "${CHAIN}" 2>/dev/null
+    iptables -t nat -X "${CHAIN}" 2>/dev/null
+fi
+
+# 3. 移除系统信任库中的 CA
+CA_DST="/usr/local/share/ca-certificates/rayshark-mitmproxy.crt"
+if [ -f "${CA_DST}" ]; then
+    rm -f "${CA_DST}" 2>/dev/null
+    command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates --fresh 2>/dev/null
+fi
+
+# 4. 删除专用用户
+if id "rayshark" >/dev/null 2>&1; then
+    command -v userdel >/dev/null 2>&1 && userdel "rayshark" 2>/dev/null
+    command -v deluser >/dev/null 2>&1 && deluser "rayshark" 2>/dev/null
+fi
+
+exit 0

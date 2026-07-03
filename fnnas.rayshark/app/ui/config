@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "fnnas.rayshark.Application": {
+            "title": "RayShark 抓包代理",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "url": "/app/fnnas-rayshark/",
+            "allUsers": false,
+            "gatewaySocket": "app.sock",
+            "gatewayPrefix": "/app/fnnas-rayshark"
+        }
+    }
+}

@@ -1,0 +1,33 @@
+#!/bin/bash
+### 安装后回调（root 执行）。
+###  1. 创建专用低权用户 rayshark（无登录、无家目录副作用），
+###     供 mitmdump 降权运行；iptables 用 --uid-owner rayshark 排除其出站避免回环。
+###  2. 预建 var 目录（SQLite / 日志 / mitm confdir 等运行期在代码里也会兜底创建）。
+set +e
+
+MITM_USER="rayshark"
+
+if ! id "${MITM_USER}" >/dev/null 2>&1; then
+    # Debian（飞牛底座）：系统用户，禁止登录
+    if command -v useradd >/dev/null 2>&1; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin "${MITM_USER}" 2>/dev/null
+    elif command -v adduser >/dev/null 2>&1; then
+        adduser --system --no-create-home --shell /usr/sbin/nologin "${MITM_USER}" 2>/dev/null
+    fi
+fi
+
+# var 目录（TRIM_PKGVAR 由飞牛注入）
+if [ -n "${TRIM_PKGVAR}" ]; then
+    mkdir -p "${TRIM_PKGVAR}/mitmproxy" "${TRIM_PKGVAR}/v2ray" \
+             "${TRIM_PKGVAR}/run" "${TRIM_PKGVAR}/logs" 2>/dev/null
+fi
+
+# 随包二进制补执行位（打包/解包可能丢失）
+if [ -n "${TRIM_APPDEST}" ]; then
+    for b in v2ray mitmdump; do
+        [ -f "${TRIM_APPDEST}/server/bin/${b}" ] && chmod +x "${TRIM_APPDEST}/server/bin/${b}" 2>/dev/null
+    done
+    [ -f "${TRIM_APPDEST}/server/rayshark_server" ] && chmod +x "${TRIM_APPDEST}/server/rayshark_server" 2>/dev/null
+fi
+
+exit 0

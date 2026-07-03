@@ -1,0 +1,21 @@
+[
+    {
+        "stepTitle": "RayShark 安装设置",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "RayShark 提供 <b>网络抓包</b> 与 <b>V2Ray 代理</b> 能力，抓取 NAS 本机的出站流量并可解密 HTTPS，通过 fnOS <b>统一网关</b>访问，无需对外暴露端口。<br><b>安全提示：</b>涉及系统级网络与证书操作，建议仅授权可信管理员使用。"
+            },
+            {
+                "type": "select",
+                "field": "rayshark_admin_only",
+                "label": "访问权限",
+                "initValue": "1",
+                "options": [
+                    { "label": "仅管理员可用（推荐）", "value": "1" },
+                    { "label": "所有已登录用户可用", "value": "0" }
+                ]
+            }
+        ]
+    }
+]

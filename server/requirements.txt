@@ -1,0 +1,19 @@
+# RayShark 后端依赖（构建 PyInstaller 二进制时安装）
+#
+# 后端服务本身只需 Web 栈：抓包与代理由随包的独立 aarch64 二进制承担，
+# 后端仅负责编排（起停进程 / 改 iptables / 装 CA / 收流量），不 import mitmproxy/v2ray。
+
+# 核心 Web
+flask>=3.0
+gevent>=24.0
+gevent-websocket>=0.10.1
+
+# ---------------------------------------------------------------------------
+# 抓包引擎 mitmdump 与代理 v2ray：均为随包附带的独立 aarch64 可执行文件，
+# 由 fetch_binaries.sh 下载放入 app/server/bin/。它们是自包含二进制，
+# 与后端 Python 解耦——因此这里【不】声明 mitmproxy / v2ray，
+# 从而让 PyInstaller 主二进制保持精简（避免 cryptography 等重依赖）。
+#
+#   mitmproxy 12.2.3  -> app/server/bin/mitmdump  (linux-aarch64)
+#   v2ray-core v5.49.0 -> app/server/bin/v2ray     (linux arm64-v8a)
+# ---------------------------------------------------------------------------

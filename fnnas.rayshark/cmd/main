@@ -1,0 +1,140 @@
+#!/bin/bash
+###############################################################################
+# RayShark — cmd/main
+# 启停/状态管理后端服务（统一网关 Unix socket 模式）。
+#
+# 优先使用 PyInstaller 打包的 aarch64 单文件二进制 server/rayshark_server；
+# 若不存在（早期开发/未打包），回落探测系统或飞牛 python3 直接跑 server.py。
+###############################################################################
+
+APP_DIR="${TRIM_APPDEST}"
+SERVER_DIR="${APP_DIR}/server"
+BIN="${SERVER_DIR}/rayshark_server"          # PyInstaller 产物（arm64 ELF）
+PY_ENTRY="${SERVER_DIR}/server.py"           # 源码入口（回落）
+SOCK_PATH="${APP_DIR}/app.sock"              # 必须与 app/ui/config 的 gatewaySocket 一致
+PID_FILE="${TRIM_PKGVAR}/rayshark.pid"
+LOG_FILE="${TRIM_PKGVAR}/rayshark.log"
+
+export RAYSHARK_SOCK="${SOCK_PATH}"
+export RAYSHARK_WEBROOT="${APP_DIR}/ui"
+export RAYSHARK_LOGFILE="${LOG_FILE}"
+export RAYSHARK_GATEWAY_PREFIX="/app/fnnas-rayshark"
+export RAYSHARK_REQUIRE_AUTH="1"
+export RAYSHARK_ADMIN_ONLY="${rayshark_admin_only:-1}"
+
+log_msg() { mkdir -p "${TRIM_PKGVAR}" 2>/dev/null; echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
+check_process() { kill -0 "$1" 2>/dev/null; }
+
+# 探测可用 python3（回落模式用），必须能 import gevent/flask 才算数
+find_python() {
+    local candidates=()
+    # 飞牛 python runtime app 常见路径
+    for d in /var/apps/python*/target/bin /var/apps/py*/target/bin; do
+        [ -x "${d}/python3" ] && candidates+=("${d}/python3")
+    done
+    candidates+=(/usr/bin/python3 /usr/local/bin/python3)
+    # PATH 中的
+    command -v python3 >/dev/null 2>&1 && candidates+=("$(command -v python3)")
+    for py in "${candidates[@]}"; do
+        [ -x "${py}" ] || continue
+        if "${py}" -c "import gevent, flask" >/dev/null 2>&1; then
+            echo "${py}"; return 0
+        fi
+    done
+    return 1
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(head -n1 "${PID_FILE}" | tr -d '[:space:]')
+        if [ -n "${pid}" ] && check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+start_process() {
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+    log_msg "=== start invoked ==="
+    log_msg "APPDEST=${APP_DIR}  PKGVAR=${TRIM_PKGVAR}  RUN_USER=${TRIM_RUN_USERNAME}"
+
+    if status; then
+        log_msg "already running"
+        return 0
+    fi
+
+    rm -f "${SOCK_PATH}"
+
+    local cmd=""
+    if [ -f "${BIN}" ]; then
+        # 校验是 ELF（防止误打包成 mac Mach-O）
+        magic="$(xxd -l 4 -p "${BIN}" 2>/dev/null)"
+        if [ "${magic}" = "7f454c46" ]; then
+            chmod +x "${BIN}" 2>/dev/null
+            cmd="${BIN}"
+            log_msg "using PyInstaller binary: ${BIN}"
+        else
+            log_msg "WARN: ${BIN} 非 ELF (magic=${magic})，可能是错误架构，跳过"
+        fi
+    fi
+
+    if [ -z "${cmd}" ]; then
+        PY="$(find_python)"
+        if [ -z "${PY}" ]; then
+            echo "未找到可用的 Python3(需含 gevent/flask)，且无 PyInstaller 二进制，启动失败。" > "${TRIM_TEMP_LOGFILE}"
+            log_msg "no python and no binary; abort"
+            return 1
+        fi
+        cmd="${PY} ${PY_ENTRY}"
+        log_msg "using python fallback: ${PY} ${PY_ENTRY}"
+    fi
+
+    log_msg "starting: ${cmd}"
+    nohup ${cmd} >> "${LOG_FILE}" 2>&1 &
+    pid=$!
+    printf "%s" "${pid}" > "${PID_FILE}"
+
+    c=0
+    while [ ! -S "${SOCK_PATH}" ] && [ ${c} -lt 30 ]; do
+        check_process "${pid}" || break
+        sleep 0.2; c=$((c+1))
+    done
+
+    if check_process "${pid}" && [ -S "${SOCK_PATH}" ]; then
+        log_msg "started pid=${pid}"
+        return 0
+    fi
+
+    echo "RayShark 服务启动失败，请查看日志：${LOG_FILE}" > "${TRIM_TEMP_LOGFILE}"
+    log_msg "start failed; recent log:"
+    tail -n 30 "${LOG_FILE}" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null
+    rm -f "${PID_FILE}"
+    return 1
+}
+
+stop_process() {
+    if [ ! -r "${PID_FILE}" ]; then
+        rm -f "${SOCK_PATH}"; return 0
+    fi
+    pid=$(head -n1 "${PID_FILE}" | tr -d '[:space:]')
+    if [ -z "${pid}" ] || ! check_process "${pid}"; then
+        rm -f "${PID_FILE}" "${SOCK_PATH}"; return 0
+    fi
+    log_msg "stopping pid=${pid}"
+    kill -TERM "${pid}" 2>/dev/null
+    c=0
+    while check_process "${pid}" && [ ${c} -lt 10 ]; do sleep 1; c=$((c+1)); done
+    check_process "${pid}" && kill -KILL "${pid}" 2>/dev/null
+    rm -f "${PID_FILE}" "${SOCK_PATH}"
+    log_msg "stopped"
+    return 0
+}
+
+case "$1" in
+    start)  start_process; exit $? ;;
+    stop)   stop_process;  exit 0 ;;
+    status) status && exit 0 || exit 3 ;;
+    *)      echo "usage: $0 {start|stop|status}"; exit 1 ;;
+esac

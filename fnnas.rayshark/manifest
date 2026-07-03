@@ -1,0 +1,13 @@
+appname               = fnnas.rayshark
+version               = 0.2.0
+display_name          = RayShark 抓包代理
+desc                  = 集网络抓包与 V2Ray 代理于一体的 NAS 工具。抓取 fnOS 本机（非浏览器客户端）的出站流量，支持透明代理解密 HTTPS（自动注入系统 CA 信任库）；内置 V2Ray-core，支持 VMess 节点灵活增删与热切换。通过 fnOS 统一网关访问，无需暴露端口。前端 Vue3，后端 Flask，均打包为 aarch64 原生运行。
+source                = thirdparty
+platform              = arm
+checkport             = false
+os_min_version        = 1.1.3100
+desktop_uidir         = ui
+desktop_applaunchname = fnnas.rayshark.Application
+maintainer            = RayShark
+distributor           = RayShark
+changelog             = 0.2.0 功能齐备：VMess 节点管理(导入/增删/测速/热切换)、mitmproxy 透明抓包(iptables 重定向 + 系统 CA 注入)、实时流量列表与详情、HAR 导出、前端 vConsole 调试；随包 aarch64 v2ray/mitmdump 二进制，mitm 降权专用用户防回环，卸载干净回滚。\n0.1.0 初始骨架：打通统一网关、Flask 后端(unix socket)、前端占位页。
