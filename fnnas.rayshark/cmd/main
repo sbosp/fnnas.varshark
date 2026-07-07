@@ -25,6 +25,22 @@ export RAYSHARK_ADMIN_ONLY="${rayshark_admin_only:-1}"
 log_msg() { mkdir -p "${TRIM_PKGVAR}" 2>/dev/null; echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 check_process() { kill -0 "$1" 2>/dev/null; }
 
+# 读取文件前 4 字节的十六进制魔数，不依赖 xxd(很多精简系统不带)。
+# 依次尝试 od / hexdump / head+od，全失败返回空。
+read_magic4() {
+    local f="$1" m=""
+    if command -v od >/dev/null 2>&1; then
+        m="$(od -An -tx1 -N4 "${f}" 2>/dev/null | tr -d ' \n\r')"
+    fi
+    if [ -z "${m}" ] && command -v hexdump >/dev/null 2>&1; then
+        m="$(hexdump -n4 -e '4/1 "%02x"' "${f}" 2>/dev/null)"
+    fi
+    if [ -z "${m}" ] && command -v xxd >/dev/null 2>&1; then
+        m="$(xxd -l 4 -p "${f}" 2>/dev/null)"
+    fi
+    printf '%s' "${m}"
+}
+
 # 探测可用 python3（回落模式用），必须能 import gevent/flask 才算数
 find_python() {
     local candidates=()
@@ -69,22 +85,35 @@ start_process() {
 
     local cmd=""
     if [ -f "${BIN}" ]; then
-        # 校验是 ELF（防止误打包成 mac Mach-O）
-        magic="$(xxd -l 4 -p "${BIN}" 2>/dev/null)"
+        # 校验是 ELF（防止误打包成 mac Mach-O）。魔数读取不依赖 xxd。
+        magic="$(read_magic4 "${BIN}")"
         if [ "${magic}" = "7f454c46" ]; then
             chmod +x "${BIN}" 2>/dev/null
             cmd="${BIN}"
-            log_msg "using PyInstaller binary: ${BIN}"
+            log_msg "using PyInstaller binary: ${BIN} (magic=elf)"
+        elif [ -z "${magic}" ]; then
+            # 所有魔数工具(od/hexdump/xxd)都不可用：不因此误杀二进制。
+            # 文件既然存在，本机(aarch64)上极大概率就是 ELF，直接尝试运行。
+            chmod +x "${BIN}" 2>/dev/null
+            cmd="${BIN}"
+            log_msg "WARN: 无法读取魔数(缺 od/hexdump/xxd)，按存在即 ELF 处理: ${BIN}"
         else
             log_msg "WARN: ${BIN} 非 ELF (magic=${magic})，可能是错误架构，跳过"
         fi
+    else
+        log_msg "WARN: 二进制不存在: ${BIN}"
     fi
 
     if [ -z "${cmd}" ]; then
         PY="$(find_python)"
         if [ -z "${PY}" ]; then
-            echo "未找到可用的 Python3(需含 gevent/flask)，且无 PyInstaller 二进制，启动失败。" > "${TRIM_TEMP_LOGFILE}"
-            log_msg "no python and no binary; abort"
+            if [ -f "${BIN}" ]; then
+                echo "后端二进制存在但无法作为可执行文件运行(疑架构不符/权限问题)，且无可用 Python3(需含 gevent/flask)。详见日志。" > "${TRIM_TEMP_LOGFILE}"
+                log_msg "binary present but not runnable; no python fallback; abort. BIN=${BIN}"
+            else
+                echo "未找到后端二进制(${BIN} 不存在)，且无可用 Python3(需含 gevent/flask)，启动失败。" > "${TRIM_TEMP_LOGFILE}"
+                log_msg "no binary at ${BIN} and no python; abort"
+            fi
             return 1
         fi
         cmd="${PY} ${PY_ENTRY}"
