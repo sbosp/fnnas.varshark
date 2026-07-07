@@ -31,11 +31,13 @@
 #   SMOKE=1 ./build_on_nas.sh         # 打完额外冒烟启动一次二进制做自检(推荐首次用)
 #   PY=/var/apps/pythonX/target/bin/python3 ./build_on_nas.sh   # 手动指定构建用 python3
 #   SKIP_BINARIES=1 ./build_on_nas.sh # bin/ 里已有 v2ray+mitmdump，跳过下载
-#   REBUILD_FRONTEND=1 ./build_on_nas.sh  # NAS 上也有 node 时顺带重建前端(通常不需要)
+#   REBUILD_FRONTEND=1 ./build_on_nas.sh  # 强制重建前端(默认：包内无产物时也会自动构建)
 #
 # 前置条件：
 #   - 一个可用的 python3 (>=3.8，能 pip install / venv)。飞牛可在应用中心装 "Python"，
 #     其路径通常在 /var/apps/python*/target/bin/python3。脚本会自动探测。
+#   - node/npm：仅当 app/ui 无已构建产物(或 REBUILD_FRONTEND=1)时需要，脚本会自动
+#     npm install + npm run build。若已随包 app/ui 产物则无需 node。
 #   - 已安装飞牛打包工具 fnpack（fnOS 开发者环境自带）。
 #   - 网络可访问 pypi 与 github(下载 pyinstaller/gevent 及随包二进制)。
 ###############################################################################
@@ -155,16 +157,29 @@ green "    随包二进制校验通过(ELF)"
 
 ###############################################################################
 info "==> [4/7] 前端静态资源 -> app/ui"
-if [ "${REBUILD_FRONTEND}" = "1" ] && command -v npm >/dev/null 2>&1; then
-    info "    NAS 上重建前端(REBUILD_FRONTEND=1)"
-    ( cd frontend && npm install && npm run build )
-    rm -rf "${PKG_DIR}/app/ui/assets"
-    cp -r frontend/dist/assets "${PKG_DIR}/app/ui/assets"
-    cp frontend/dist/index.html "${PKG_DIR}/app/ui/index.html"
-    green "    前端已重建并同步到 ${PKG_DIR}/app/ui"
+UI_DIR="${PKG_DIR}/app/ui"
+HAS_UI=0
+[ -f "${UI_DIR}/index.html" ] && [ -d "${UI_DIR}/assets" ] && HAS_UI=1
+# 何时构建：显式 REBUILD_FRONTEND=1，或包内还没有已构建产物
+if [ "${REBUILD_FRONTEND}" = "1" ] || [ "${HAS_UI}" != "1" ]; then
+    command -v npm >/dev/null 2>&1 \
+        || die "app/ui 缺少已构建前端且未找到 npm。请安装 Node(应用中心/nvm)，或在有 node 的机器上先构建后再拷入 ${UI_DIR}。"
+    [ -d "${HERE}/frontend" ] || die "未找到前端源码目录 ${HERE}/frontend。"
+    if [ "${HAS_UI}" != "1" ]; then
+        info "    app/ui 无已构建产物，自动构建前端"
+    else
+        info "    REBUILD_FRONTEND=1，重建前端"
+    fi
+    ( cd "${HERE}/frontend" \
+      && { [ -d node_modules ] || { info "    安装 npm 依赖(node_modules 缺失)"; npm install; }; } \
+      && info "    执行 npm run build" \
+      && npm run build ) || die "前端构建失败"
+    [ -d "${HERE}/frontend/dist" ] || die "前端构建未产出 dist 目录"
+    # 只覆盖构建产物(assets/index.html)，保留 ui 内的 config/ images/ 等随包静态资源
+    rm -rf "${UI_DIR}/assets"
+    cp -r "${HERE}/frontend/dist/." "${UI_DIR}/"
+    green "    前端已构建并同步到 ${UI_DIR}(含 vConsole chunk)"
 else
-    [ -f "${PKG_DIR}/app/ui/index.html" ] && [ -d "${PKG_DIR}/app/ui/assets" ] \
-        || die "app/ui 缺少已构建的前端资源。请在有 node 的机器上先 npm run build，或设 REBUILD_FRONTEND=1。"
     green "    复用打包目录内已构建的 app/ui(含 vConsole chunk)"
 fi
 
