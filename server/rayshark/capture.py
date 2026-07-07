@@ -193,6 +193,7 @@ class CaptureManager:
 
         # 两个开关都关：清空即可，不建链
         if not self._global_on and not self._capture_on:
+            self._set_ipv6(disable=False)  # 恢复 IPv6
             return {"ok": True, "global": False, "capture": False}
 
         try:
@@ -214,6 +215,11 @@ class CaptureManager:
                   "-p", "udp", "--dport", "53", "-j", "RETURN"])
             _run(["iptables", "-t", "nat", "-A", CHAIN,
                   "-p", "tcp", "--dport", "53", "-j", "RETURN"])
+            # 3.6) 防自环兜底：任何目标端口本身就是透明口/mitm 口的包一律直连，
+            #   绝不再重定向到透明口自身（杜绝 redirect-to-self 级联）。
+            for self_port in (self.transparent_port, self.mitm_port):
+                _run(["iptables", "-t", "nat", "-A", CHAIN,
+                      "-p", "tcp", "--dport", str(self_port), "-j", "RETURN"])
             # 4) 抓包叠加：80/443 先转 mitm 解密（mitm 上游请求已在第 2 步放行）
             if self._capture_on:
                 for port in self.ports:
@@ -232,6 +238,8 @@ class CaptureManager:
                       "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
             # OUTPUT 挂唯一跳转
             _run(["iptables", "-t", "nat", "-A", "OUTPUT", "-j", CHAIN])
+            # 全局代理开启时禁用 IPv6，防止 v6 出站绕过 v4-only 的代理链
+            self._set_ipv6(disable=self._global_on)
             return {
                 "ok": True,
                 "global": self._global_on,
@@ -256,9 +264,25 @@ class CaptureManager:
                     break
         _run(["iptables", "-t", "nat", "-F", CHAIN])
         _run(["iptables", "-t", "nat", "-X", CHAIN])
+        # 链被清 = 代理不再接管，务必恢复 IPv6（含关机自愈/kill -9 遗留场景）
+        self._set_ipv6(disable=False)
         if not silent:
             log.info("iptables chain %s cleared", CHAIN)
         return {"ok": True}
+
+    # ---- IPv6 泄漏防护 ----
+    #   iptables 只管 IPv4，NAS 的 IPv6 出站会完全绕过代理(既泄漏真实 v6 地址，
+    #   也让"全局代理"名不副实)。全局代理开启时禁用 IPv6 出站，强制走 IPv4→代理；
+    #   关闭时恢复。用 sysctl disable_ipv6(干净可逆，比 ip6tables 规则更稳)。
+    _V6_KEYS = ("net.ipv6.conf.all.disable_ipv6", "net.ipv6.conf.default.disable_ipv6")
+
+    def _set_ipv6(self, disable: bool) -> None:
+        val = "1" if disable else "0"
+        for key in self._V6_KEYS:
+            try:
+                _run(["sysctl", "-w", f"{key}={val}"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("set %s=%s failed: %s", key, val, e)
 
     # ---- 全局代理开关（由 /proxy/start|stop 联动）----
     def enable_global(self) -> Dict[str, Any]:

@@ -139,8 +139,15 @@ def build_config(node: Dict[str, Any], apply_mark: bool = True) -> Dict[str, Any
                 # 透明入站：iptables 把本机出站 REDIRECT 到此端口后，
                 # dokodemo-door 用 followRedirect 从内核取回原始目的地址。
                 # sniffing 探测 http/tls 以还原域名，供路由/日志使用。
+                #
+                # 关键：必须绑 127.0.0.1，绝不能绑 0.0.0.0。
+                #   REDIRECT 会把包的目的地址重写成 127.0.0.1:12345，所以绑本地
+                #   足以收到全部被重定向的流量。若绑 0.0.0.0，LAN 内主机可直连
+                #   本口，而这类"非经 iptables 重定向"的连接读 SO_ORIGINAL_DST
+                #   会拿到 12345 自身 → v2ray 回连 127.0.0.1:12345 → 触发新入站
+                #   → 无限自环级联(fd 暴涨、多核烧满)。绑本地即从根上杜绝。
                 "tag": "transparent-in",
-                "listen": "0.0.0.0",
+                "listen": "127.0.0.1",
                 "port": TRANSPARENT_PORT,
                 "protocol": "dokodemo-door",
                 "settings": {"network": "tcp,udp", "followRedirect": True},
