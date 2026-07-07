@@ -272,3 +272,7 @@ green " 打包完成: ${FPK}  ($(du -h "${FPK}" | cut -f1))"
 green " 内含 aarch64 PyInstaller 后端二进制，运行时无需系统 python3。"
 green " 安装: appcenter-cli install-fpk ${FPK}   或在飞牛应用中心手动上传安装"
 green "======================================================================"
+
+cd PKG_DIR
+
+appcenter-cli install-local
