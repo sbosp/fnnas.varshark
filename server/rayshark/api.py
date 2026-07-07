@@ -58,6 +58,7 @@ def overview():
     db = get_db()
     proxy_st = get_proxy().status()
     cap_st = get_capture().status()
+    proxy_st["global_active"] = cap_st.get("global_active", False)
     return jsonify(
         version=__version__,
         active_node_id=db.get_setting("active_node_id"),
@@ -134,12 +135,15 @@ def test_node(node_id: int):
 # ----------------------------- 代理控制 -----------------------------
 @bp.get("/proxy/status")
 def proxy_status():
-    return jsonify(get_proxy().status())
+    st = get_proxy().status()
+    # 全局接管状态由 capture 侧的 iptables 链决定，合并进来方便前端展示
+    st["global_active"] = get_capture().global_active()
+    return jsonify(st)
 
 
 @bp.post("/proxy/start")
 def proxy_start():
-    """启动/切换到指定节点（body: {node_id}）。"""
+    """启动/切换到指定节点并开启全局透明代理（body: {node_id}）。"""
     data = request.get_json(silent=True) or {}
     db = get_db()
     node_id = data.get("node_id") or db.get_setting("active_node_id")
@@ -151,13 +155,26 @@ def proxy_start():
     res = get_proxy().reload(node)
     if res.get("ok"):
         db.set_setting("active_node_id", int(node_id))
-        ws_mod.publish_event("proxy_started", {"node_id": int(node_id), "name": node["name"]})
+        # v2ray 起来后，接管本机出站为全局透明代理（best-effort，
+        # 失败不阻断代理本身——本地 socks/http 仍可用）。
+        gres = get_capture().enable_global()
+        res["global"] = gres
+        ws_mod.publish_event("proxy_started", {
+            "node_id": int(node_id), "name": node["name"],
+            "global": bool(gres.get("ok") and gres.get("global")),
+        })
     return jsonify(res)
 
 
 @bp.post("/proxy/stop")
 def proxy_stop():
+    # 先撤销全局 iptables 接管（同时会关掉叠加的抓包），再停 v2ray。
+    # 顺序很重要：否则先停 v2ray 会导致透明口失效、被接管的流量黑洞。
+    cap = get_capture()
+    cap.stop_mitm()          # 幂等：抓包没开也安全
+    gres = cap.disable_global()
     res = get_proxy().stop()
+    res["global"] = gres
     ws_mod.publish_event("proxy_stopped", {})
     return jsonify(res)
 
@@ -173,6 +190,9 @@ def capture_start():
     data = request.get_json(silent=True) or {}
     ports = data.get("ports")
     cap = get_capture()
+    if not cap.global_active():
+        return jsonify(error="请先在「代理节点」页启动代理，抓包是全局代理之上的叠加",
+                       need_global=True), 409
     if not cap.ca_installed_in_system():
         return jsonify(error="系统 CA 未安装，无法解密 HTTPS。请先调用 /capture/ca/install",
                        need_ca=True), 409

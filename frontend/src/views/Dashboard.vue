@@ -26,9 +26,12 @@ const capOn = computed(() => ov.value?.capture?.alive)
       <div class="stat-h">代理状态</div>
       <div class="stat-v">
         <span class="tag" :class="proxyOn ? 'ok' : 'off'">{{ proxyOn ? '运行中' : '已停止' }}</span>
+        <span v-if="proxyOn" class="tag" :class="ov?.proxy?.global_active ? 'ok' : 'off'" style="margin-left:6px">
+          {{ ov?.proxy?.global_active ? '全局接管' : '仅本地口' }}
+        </span>
       </div>
       <div class="muted" v-if="ov?.proxy">
-        SOCKS :{{ ov.proxy.socks_port }} · HTTP :{{ ov.proxy.http_port }}<br>
+        SOCKS :{{ ov.proxy.socks_port }} · HTTP :{{ ov.proxy.http_port }} · 透明 :{{ ov.proxy.transparent_port }}<br>
         二进制 {{ ov.proxy.binary ? '✓' : '✗ 未安装' }}
       </div>
     </div>
@@ -76,8 +79,8 @@ const capOn = computed(() => ov.value?.capture?.alive)
   <div class="card">
     <h2>快速开始</h2>
     <ol class="muted" style="line-height:2;padding-left:18px;margin:0">
-      <li>到 <b>代理节点</b> 添加 VMess 节点（支持粘贴 vmess:// 链接），启动代理</li>
-      <li>到 <b>抓包</b> 页安装系统 CA 证书（解密 HTTPS 必需），然后开始抓包</li>
+      <li>到 <b>代理节点</b> 添加 VMess 节点（支持粘贴 vmess:// 链接），启动代理 —— 本机出站将<b>整体走 v2ray 全局代理</b></li>
+      <li>（可选）到 <b>抓包</b> 页安装系统 CA，开启抓包 —— 在全局代理之上叠加解密 80/443</li>
       <li>到 <b>流量</b> 页实时查看 NAS 本机出站请求的明文内容</li>
     </ol>
   </div>

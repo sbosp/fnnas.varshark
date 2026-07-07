@@ -73,8 +73,11 @@ async function doActivate(n) {
   loading.value = true
   try {
     const r = await startProxy(n.id)
-    if (r.ok) flash(`已切换到「${n.name}」`)
-    else flash('启动失败：' + (r.error || JSON.stringify(r)))
+    if (r.ok) {
+      const g = r.global && r.global.ok && r.global.global
+      flash(g ? `已切换到「${n.name}」，全局代理已接管本机出站 ✓`
+              : `已切换到「${n.name}」（全局接管未生效，仅本地端口可用）`)
+    } else flash('启动失败：' + (r.error || JSON.stringify(r)))
     await refresh()
   } catch (e) { flash('启动失败：' + e) } finally { loading.value = false }
 }
@@ -92,6 +95,9 @@ async function doStop() {
       <div class="row">
         <span class="tag" :class="proxy.alive ? 'ok' : 'off'">
           代理{{ proxy.alive ? '运行中' : '已停止' }}
+        </span>
+        <span v-if="proxy.alive" class="tag" :class="proxy.global_active ? 'ok' : 'off'">
+          全局接管{{ proxy.global_active ? '生效' : '未生效' }}
         </span>
         <span class="muted" v-if="!proxy.binary">⚠️ v2ray 二进制未安装（打包时由 build.sh 放入）</span>
       </div>

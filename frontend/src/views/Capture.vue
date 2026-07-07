@@ -20,7 +20,7 @@ onUnmounted(() => clearInterval(timer))
 
 function flash(t) { msg.value = t; setTimeout(() => { if (msg.value === t) msg.value = '' }, 4000) }
 
-const canCapture = computed(() => st.value.binary && st.value.ca_in_system)
+const canCapture = computed(() => st.value.binary && st.value.ca_in_system && st.value.global_active)
 
 async function doInstallCA() {
   loading.value = true
@@ -42,6 +42,7 @@ async function doStart() {
     const arr = ports.value.split(',').map(x => parseInt(x.trim())).filter(Boolean)
     const r = await startCapture(arr)
     if (r.ok) flash('抓包已启动 ✓')
+    else if (r.need_global) flash('请先到「代理节点」页启动代理')
     else if (r.need_ca) flash('请先安装系统 CA')
     else flash('启动失败：' + JSON.stringify(r.detail || r.error || r))
     await refresh()
@@ -62,6 +63,7 @@ async function loadLog() {
   <div class="card">
     <h2>抓包引擎状态</h2>
     <div class="statgrid">
+      <div><span class="muted">全局代理</span><br><span class="tag" :class="st.global_active ? 'ok' : 'off'">{{ st.global_active ? '已接管' : '未接管' }}</span></div>
       <div><span class="muted">mitmdump 二进制</span><br><span class="tag" :class="st.binary ? 'ok' : 'off'">{{ st.binary ? '已安装' : '未安装' }}</span></div>
       <div><span class="muted">系统 CA</span><br><span class="tag" :class="st.ca_in_system ? 'ok' : 'off'">{{ st.ca_in_system ? '已装入' : '未装入' }}</span></div>
       <div><span class="muted">iptables 重定向</span><br><span class="tag" :class="st.iptables_active ? 'ok' : 'off'">{{ st.iptables_active ? '生效' : '未生效' }}</span></div>
@@ -93,11 +95,12 @@ async function loadLog() {
       <button class="btn primary" v-if="!st.alive" @click="doStart" :disabled="loading || !canCapture">开始抓包</button>
       <button class="btn danger" v-else @click="doStop" :disabled="loading">停止抓包</button>
       <span v-if="!canCapture" class="muted">
-        {{ !st.binary ? '需先安装 mitmdump 二进制；' : '' }}{{ !st.ca_in_system ? '需先安装系统 CA。' : '' }}
+        {{ !st.global_active ? '需先到「代理节点」页启动代理；' : '' }}{{ !st.binary ? '需先安装 mitmdump 二进制；' : '' }}{{ !st.ca_in_system ? '需先安装系统 CA。' : '' }}
       </span>
     </div>
     <p class="muted" style="margin-top:10px">
-      抓取的是 <b>NAS 设备本机</b>发起的出站流量（OUTPUT 链重定向），不是浏览器/前端客户端的流量。
+      抓包是<b>叠加在全局代理之上</b>的：开启代理后本机出站已整体走 v2ray，抓包再把
+      <b>80/443</b> 先经 mitmproxy 解密成明文、再复入链路走节点出海。停止抓包不影响全局代理，
       内网与本地地址已自动排除。开始后到「流量」页查看实时明文。
     </p>
   </div>

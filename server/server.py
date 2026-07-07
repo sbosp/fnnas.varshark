@@ -28,6 +28,7 @@ from geventwebsocket.handler import WebSocketHandler  # noqa: E402
 from rayshark.app import create_app  # noqa: E402
 from rayshark.config import Settings  # noqa: E402
 from rayshark.procman import get_procman  # noqa: E402
+from rayshark.capture import get_capture  # noqa: E402
 
 
 def _setup_logging(logfile: str) -> None:
@@ -73,6 +74,13 @@ def main() -> int:
 
     app = create_app(settings)
 
+    # 自愈：清理上一次非正常退出（如 kill -9）可能残留的 iptables 链，
+    # 避免陈旧的全局重定向把出站导向已不存在的 v2ray 端口。
+    try:
+        get_capture()._flush_chain(silent=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("startup iptables self-heal failed: %s", e)
+
     # ---- 主服务器 ----
     if settings.tcp_mode:
         main_listener = (settings.tcp_host, settings.tcp_port)
@@ -91,6 +99,12 @@ def main() -> int:
 
     def _shutdown(*_a):
         log.info("shutting down")
+        # 关键：先撤销 iptables 全局接管，否则进程停了、链还在，
+        # 会把本机全部出站重定向到已死的 v2ray 端口 -> NAS 断网。
+        try:
+            get_capture().disable_global()
+        except Exception as e:  # noqa: BLE001
+            log.warning("disable_global on shutdown failed: %s", e)
         try:
             get_procman().stop_all()
         except Exception as e:  # noqa: BLE001

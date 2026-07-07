@@ -15,7 +15,10 @@ fi
 
 # 2. iptables 干净回滚
 if command -v iptables >/dev/null 2>&1; then
-    # 删 OUTPUT 中所有指向本链的跳转
+    # 删 OUTPUT 中所有指向本链的跳转（兼容新版 `-j CHAIN` 与旧版 `-p tcp -j CHAIN`）
+    for _ in 1 2 3 4 5; do
+        iptables -t nat -D OUTPUT -j "${CHAIN}" 2>/dev/null || break
+    done
     for _ in 1 2 3 4 5; do
         iptables -t nat -D OUTPUT -p tcp -j "${CHAIN}" 2>/dev/null || break
     done

@@ -99,10 +99,9 @@ def _init_modules(settings: Settings) -> None:
     pm_mod.init_procman(settings.var_dir)
     ws_mod.init_ws(settings.flow_buffer_size)
     proxy_mod.init_proxy(settings.var_dir, settings.v2ray_bin)
-    upstream = None  # 抓包上游是否走 v2ray，由前端后续控制；默认直连
     cap_mod.init_capture(
         settings.var_dir, settings.mitm_bin, settings.addon_path,
-        settings.ingest_port, upstream,
+        settings.ingest_port, proxy_mod.TRANSPARENT_PORT,
     )
     log.info("modules initialized: db=%s v2ray_bin=%s mitm_bin=%s",
              settings.db_path, settings.v2ray_bin, settings.mitm_bin)

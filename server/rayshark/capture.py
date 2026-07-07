@@ -26,6 +26,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .procman import get_procman
+from .proxy import TRANSPARENT_PORT, SO_MARK
 
 log = logging.getLogger("rayshark.capture")
 
@@ -33,7 +34,12 @@ PROC_NAME = "mitmdump"
 CHAIN = "RAYSHARK_OUT"
 DEFAULT_MITM_PORT = 8080
 DEFAULT_PORTS = [80, 443]
-# 运行 mitm 的专用用户（安装脚本创建），其出站流量不被重定向，避免回环
+# 私网/回环/链路本地：这些目的地一律直连，不进代理也不抓包
+PRIVATE_NETS = (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+    "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4",
+)
+# 运行 mitm 的专用用户（安装脚本创建），其出站流量不被重定向到 mitm，避免回环
 MITM_USER = os.environ.get("RAYSHARK_MITM_USER", "rayshark")
 
 
@@ -45,17 +51,21 @@ def _run(argv: List[str], check: bool = False, timeout: int = 15) -> subprocess.
 
 class CaptureManager:
     def __init__(self, var_dir: str, mitm_bin: str, addon_path: str,
-                 ingest_port: int, upstream_proxy: Optional[str] = None):
+                 ingest_port: int, transparent_port: int = TRANSPARENT_PORT):
         self.var_dir = var_dir
         self.mitm_bin = mitm_bin
         self.addon_path = addon_path
         self.ingest_port = ingest_port
-        self.upstream_proxy = upstream_proxy  # 形如 http://127.0.0.1:11081，抓完走 v2ray 出海
+        self.transparent_port = transparent_port  # v2ray dokodemo 透明入站口
         self.mitm_port = DEFAULT_MITM_PORT
         self.ports = list(DEFAULT_PORTS)
         self.confdir = os.path.join(var_dir, "mitmproxy")
         os.makedirs(self.confdir, exist_ok=True)
-        self._rules_applied = False
+        # 两个独立开关，共同决定 iptables 链形态：
+        #   global_on  = v2ray 全局透明代理是否接管本机出站
+        #   capture_on = 是否在其上叠加 mitmproxy 解密抓包(80/443)
+        self._global_on = False
+        self._capture_on = False
 
     # ---------------- 二进制/证书探测 ----------------
     def binary_exists(self) -> bool:
@@ -136,72 +146,116 @@ class CaptureManager:
     def ca_installed_in_system(self) -> bool:
         return os.path.isfile("/usr/local/share/ca-certificates/rayshark-mitmproxy.crt")
 
-    # ---------------- iptables 重定向 ----------------
+    # ---------------- iptables（全局代理 + 可选抓包 统一管理） ----------------
     def _iptables_available(self) -> bool:
         return shutil.which("iptables") is not None
 
-    def apply_iptables(self, ports: Optional[List[int]] = None) -> Dict[str, Any]:
-        """创建 RAYSHARK_OUT 链并把本机出站指定端口 REDIRECT 到 mitm 端口。
+    def _rebuild_chain(self) -> Dict[str, Any]:
+        """按当前 (global_on, capture_on) 两个标志，原子重建整条 RAYSHARK_OUT 链。
 
-        只影响 nat/OUTPUT，且全部规则挂自定义链，卸载时整链删除可干净回滚。
-        用 --uid-owner 排除 mitm 运行用户，避免 mitm 上游请求被再次重定向（回环）。
+        规则顺序（命中即止，靠 RETURN/REDIRECT 短路）：
+          1. 带 SO_MARK(v2ray 自身出海流量) -> RETURN     防代理流量回环
+          2. mitm 运行用户的出站          -> RETURN       防抓包解密后上游请求回环
+          3. 私网/回环/组播目的地          -> RETURN       内网与本机直连
+          4. [抓包开] tcp 80/443          -> REDIRECT mitm 端口   叠加解密
+          5. [全局开] 其余 tcp/udp         -> REDIRECT v2ray 透明口  全局接管
+
+        全部规则挂自定义链，OUTPUT 仅一条 -j 跳转；关闭时整链删除干净回滚。
+        capture_on 为真时必须 global_on 也为真（抓包是全局代理之上的叠加）。
         """
         if not self._iptables_available():
             return {"ok": False, "error": "iptables 不可用"}
-        ports = ports or self.ports
-        self.ports = ports
 
-        # route_localnet：允许把包重定向到 127.0.0.1
+        # route_localnet：允许把包重定向到 127.0.0.1 上的本机端口
         try:
             _run(["sysctl", "-w", "net.ipv4.conf.all.route_localnet=1"])
         except Exception as e:  # noqa: BLE001
             log.warning("set route_localnet failed: %s", e)
 
-        # 先清理残留
-        self.clear_iptables(silent=True)
+        # 先彻底清理，保证幂等
+        self._flush_chain(silent=True)
+
+        # 两个开关都关：清空即可，不建链
+        if not self._global_on and not self._capture_on:
+            return {"ok": True, "global": False, "capture": False}
 
         try:
             _run(["iptables", "-t", "nat", "-N", CHAIN])
-            # 排除发往局域网/本机自身的流量（只抓公网出站）
-            for net in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
-                        "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4"):
-                _run(["iptables", "-t", "nat", "-A", CHAIN, "-d", net, "-j", "RETURN"])
-            # 排除 mitm 运行用户自己的出站，避免回环
+            # 1) 放行 v2ray 自身出海（按 fwmark），这是防回环的第一道闸
+            _run(["iptables", "-t", "nat", "-A", CHAIN,
+                  "-m", "mark", "--mark", str(SO_MARK), "-j", "RETURN"])
+            # 2) 放行 mitm 运行用户的出站（解密后走 v2ray 时不再被 mitm 截获）
             _run(["iptables", "-t", "nat", "-A", CHAIN,
                   "-m", "owner", "--uid-owner", MITM_USER, "-j", "RETURN"])
-            # 命中端口 REDIRECT 到 mitm
-            for port in ports:
-                _run(["iptables", "-t", "nat", "-A", CHAIN,
-                      "-p", "tcp", "--dport", str(port),
-                      "-j", "REDIRECT", "--to-ports", str(self.mitm_port)])
-            # 从 OUTPUT 跳转到自定义链
-            _run(["iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-j", CHAIN])
-            self._rules_applied = True
-            return {"ok": True, "ports": ports, "redirect_to": self.mitm_port}
+            # 3) 私网/回环/组播直连
+            for net in PRIVATE_NETS:
+                _run(["iptables", "-t", "nat", "-A", CHAIN, "-d", net, "-j", "RETURN"])
+            # 4) 抓包叠加：80/443 先转 mitm 解密（mitm 上游请求已在第 2 步放行）
+            if self._capture_on:
+                for port in self.ports:
+                    _run(["iptables", "-t", "nat", "-A", CHAIN,
+                          "-p", "tcp", "--dport", str(port),
+                          "-j", "REDIRECT", "--to-ports", str(self.mitm_port)])
+            # 5) 全局接管：其余 tcp/udp 全部导入 v2ray 透明入站
+            if self._global_on:
+                for proto in ("tcp", "udp"):
+                    _run(["iptables", "-t", "nat", "-A", CHAIN,
+                          "-p", proto,
+                          "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
+            # OUTPUT 挂唯一跳转
+            _run(["iptables", "-t", "nat", "-A", "OUTPUT", "-j", CHAIN])
+            return {
+                "ok": True,
+                "global": self._global_on,
+                "capture": self._capture_on,
+                "capture_ports": self.ports if self._capture_on else [],
+                "transparent_port": self.transparent_port,
+                "mitm_port": self.mitm_port,
+            }
         except Exception as e:  # noqa: BLE001
+            # 出错回滚，避免留下半条链
+            self._flush_chain(silent=True)
             return {"ok": False, "error": str(e)}
 
-    def clear_iptables(self, silent: bool = False) -> Dict[str, Any]:
-        """删除跳转 + flush + 删链，干净回滚。"""
+    def _flush_chain(self, silent: bool = False) -> Dict[str, Any]:
+        """删 OUTPUT 跳转 + flush + 删链。兼容旧版 `-p tcp -j CHAIN` 跳转。"""
         if not self._iptables_available():
             return {"ok": False, "error": "iptables 不可用"}
-        # 删 OUTPUT 里的跳转（可能有多条，循环删干净）
-        for _ in range(5):
-            r = _run(["iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-j", CHAIN])
-            if r.returncode != 0:
-                break
+        for jump in (["-j", CHAIN], ["-p", "tcp", "-j", CHAIN]):
+            for _ in range(5):
+                r = _run(["iptables", "-t", "nat", "-D", "OUTPUT", *jump])
+                if r.returncode != 0:
+                    break
         _run(["iptables", "-t", "nat", "-F", CHAIN])
         _run(["iptables", "-t", "nat", "-X", CHAIN])
-        self._rules_applied = False
         if not silent:
-            log.info("iptables rules cleared")
+            log.info("iptables chain %s cleared", CHAIN)
         return {"ok": True}
 
-    def iptables_active(self) -> bool:
+    # ---- 全局代理开关（由 /proxy/start|stop 联动）----
+    def enable_global(self) -> Dict[str, Any]:
+        self._global_on = True
+        return self._rebuild_chain()
+
+    def disable_global(self) -> Dict[str, Any]:
+        """关闭全局代理。同时会关掉抓包（抓包依赖全局链存在）。"""
+        self._global_on = False
+        self._capture_on = False
+        return self._rebuild_chain()
+
+    def global_active(self) -> bool:
+        return self.chain_installed() and self._global_on
+
+    # ---- 兼容旧接口：整链是否挂在 OUTPUT 上 ----
+    def chain_installed(self) -> bool:
         if not self._iptables_available():
             return False
-        r = _run(["iptables", "-t", "nat", "-C", "OUTPUT", "-p", "tcp", "-j", CHAIN])
+        r = _run(["iptables", "-t", "nat", "-C", "OUTPUT", "-j", CHAIN])
         return r.returncode == 0
+
+    def iptables_active(self) -> bool:
+        # 保留旧名：链已安装即视为有重定向生效
+        return self.chain_installed()
 
     # ---------------- mitmdump 进程 ----------------
     def _chown_confdir(self, username: str) -> None:
@@ -244,9 +298,9 @@ class CaptureManager:
             "-s", self.addon_path,
             "-q",  # 安静，日志由 addon/后端管
         ]
-        if self.upstream_proxy:
-            # 抓完的流量走 v2ray 出海：上游模式
-            argv += ["--mode", f"upstream:{self.upstream_proxy}"]
+        # 注意：不再用 --mode upstream。mitm 解密后的上游请求以 rayshark 用户
+        # 发出，会重新经过 iptables 链，被第 5 条规则导入 v2ray 透明入站出海，
+        # 从而天然实现“抓包 + 全局代理”叠加，无需 mitm 自己接上游。
         return get_procman().start(PROC_NAME, argv, env=env, run_as=run_as)
 
     @staticmethod
@@ -263,18 +317,32 @@ class CaptureManager:
 
     # ---------------- 会话编排 ----------------
     def start_capture(self, ports: Optional[List[int]] = None) -> Dict[str, Any]:
-        """启动完整抓包：mitm 进程 + iptables 重定向。"""
+        """在全局代理之上叠加抓包：起 mitm 进程 + 把 80/443 REDIRECT 到 mitm。
+
+        前提是全局代理已开（_global_on）。若未开则拒绝，避免只抓不出海的
+        半截链路让用户困惑。
+        """
+        if not self._global_on:
+            return {"ok": False, "error": "请先启动代理（全局代理未开启，无法叠加抓包）",
+                    "need_global": True}
+        if ports:
+            self.ports = ports
         r1 = self.start_mitm()
         if not r1.get("ok"):
             return {"ok": False, "stage": "mitm", "detail": r1}
-        r2 = self.apply_iptables(ports)
+        self._capture_on = True
+        r2 = self._rebuild_chain()
         if not r2.get("ok"):
+            self._capture_on = False
             self.stop_mitm()
+            self._rebuild_chain()
             return {"ok": False, "stage": "iptables", "detail": r2}
         return {"ok": True, "mitm": r1, "iptables": r2}
 
     def stop_capture(self) -> Dict[str, Any]:
-        r2 = self.clear_iptables()
+        """停止抓包，但保留全局代理。只翻转 capture 标志并重建链。"""
+        self._capture_on = False
+        r2 = self._rebuild_chain()
         r1 = self.stop_mitm()
         return {"ok": True, "mitm": r1, "iptables": r2}
 
@@ -288,7 +356,9 @@ class CaptureManager:
             "ca_generated": self.ca_exists(),
             "ca_in_system": self.ca_installed_in_system(),
             "iptables_active": self.iptables_active(),
-            "upstream_proxy": self.upstream_proxy,
+            "global_active": self.global_active(),
+            "capture_on": self._capture_on,
+            "transparent_port": self.transparent_port,
         }
 
 
@@ -296,9 +366,9 @@ _INSTANCE: Optional[CaptureManager] = None
 
 
 def init_capture(var_dir: str, mitm_bin: str, addon_path: str,
-                 ingest_port: int, upstream_proxy: Optional[str] = None) -> CaptureManager:
+                 ingest_port: int, transparent_port: int = TRANSPARENT_PORT) -> CaptureManager:
     global _INSTANCE
-    _INSTANCE = CaptureManager(var_dir, mitm_bin, addon_path, ingest_port, upstream_proxy)
+    _INSTANCE = CaptureManager(var_dir, mitm_bin, addon_path, ingest_port, transparent_port)
     return _INSTANCE
 
 

@@ -5,7 +5,7 @@
             "icon": "images/icon_{0}.png",
             "type": "iframe",
             "protocol": "",
-            "url": "/app/fnnas-rayshark/",
+            "url": "/app/fnnas-rayshark?debug=1",
             "allUsers": false,
             "gatewaySocket": "app.sock",
             "gatewayPrefix": "/app/fnnas-rayshark"

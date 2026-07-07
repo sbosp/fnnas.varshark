@@ -28,6 +28,12 @@ PROC_NAME = "v2ray"
 # 本地入站端口（仅监听 127.0.0.1）
 SOCKS_PORT = 11080
 HTTP_PORT = 11081
+# 透明代理入站（dokodemo-door），供 iptables REDIRECT 全局流量导入。
+# 监听 0.0.0.0 是因为 REDIRECT 会把目标改写为本机，但源仍是本机各进程。
+TRANSPARENT_PORT = 12345
+# v2ray 自身出海流量（VMess/direct 出站）打的防火墙标记；
+# iptables 链里对带此标记的包直接 RETURN，避免代理流量再被重定向成环。
+SO_MARK = 255
 
 
 def parse_vmess_link(link: str) -> Dict[str, Any]:
@@ -94,6 +100,8 @@ def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
         stream["security"] = "tls"
         sni = node.get("sni") or node.get("ws_host") or node.get("address")
         stream["tlsSettings"] = {"serverName": sni, "allowInsecure": False}
+    # v2ray 发往节点的连接打防火墙标记，iptables 对该标记 RETURN，防止回环。
+    stream["sockopt"] = {"mark": SO_MARK}
 
     return {
         "log": {"loglevel": "warning"},
@@ -111,6 +119,17 @@ def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
                 "port": HTTP_PORT,
                 "protocol": "http",
                 "settings": {},
+            },
+            {
+                # 透明入站：iptables 把本机出站 REDIRECT 到此端口后，
+                # dokodemo-door 用 followRedirect 从内核取回原始目的地址。
+                # sniffing 探测 http/tls 以还原域名，供路由/日志使用。
+                "tag": "transparent-in",
+                "listen": "0.0.0.0",
+                "port": TRANSPARENT_PORT,
+                "protocol": "dokodemo-door",
+                "settings": {"network": "tcp,udp", "followRedirect": True},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
             },
         ],
         "outbounds": [
@@ -134,8 +153,28 @@ def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
                 },
                 "streamSettings": stream,
             },
-            {"tag": "direct", "protocol": "freedom", "settings": {}},
+            {
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": {},
+                "streamSettings": {"sockopt": {"mark": SO_MARK}},
+            },
         ],
+        # 路由：私网/回环直连，其余走代理出站。
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "ip": [
+                        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+                        "192.168.0.0/16", "169.254.0.0/16", "::1/128",
+                        "fc00::/7", "fe80::/10",
+                    ],
+                    "outboundTag": "direct",
+                },
+            ],
+        },
     }
 
 
@@ -179,6 +218,7 @@ class ProxyManager:
         st = get_procman().status(PROC_NAME)
         st["socks_port"] = SOCKS_PORT
         st["http_port"] = HTTP_PORT
+        st["transparent_port"] = TRANSPARENT_PORT
         st["binary"] = self.binary_exists()
         return st
 
