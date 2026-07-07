@@ -148,9 +148,10 @@ async function doStop() {
         <th>名称</th><th>地址</th><th>传输</th><th>测速</th><th style="width:200px">操作</th>
       </tr></thead>
       <tbody>
-        <tr v-for="n in nodes" :key="n.id" :class="{ active: n.id === activeId }">
+        <tr v-for="n in nodes" :key="n.id" :class="{ active: proxy.alive && n.id === activeId }">
           <td>
-            <span v-if="n.id === activeId" class="tag ok" style="margin-right:6px">激活</span>
+            <span v-if="proxy.alive && n.id === activeId" class="tag ok" style="margin-right:6px">激活</span>
+            <span v-else-if="n.id === activeId" class="tag off" style="margin-right:6px">上次使用</span>
             {{ n.name }}
           </td>
           <td class="mono">{{ n.address }}:{{ n.port }}</td>
@@ -165,7 +166,7 @@ async function doStop() {
           </td>
           <td class="row">
             <button class="btn" @click="doTest(n)">测速</button>
-            <button class="btn primary" v-if="n.id !== activeId" @click="doActivate(n)" :disabled="loading">启用</button>
+            <button class="btn primary" v-if="!(proxy.alive && n.id === activeId)" @click="doActivate(n)" :disabled="loading">启用</button>
             <button class="btn danger" @click="doDelete(n)">删</button>
           </td>
         </tr>

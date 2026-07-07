@@ -88,8 +88,14 @@ def parse_vmess_link(link: str) -> Dict[str, Any]:
     }
 
 
-def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
-    """由节点生成 v2ray 4/5.x 兼容的 config。"""
+def build_config(node: Dict[str, Any], apply_mark: bool = True) -> Dict[str, Any]:
+    """由节点生成 v2ray 4/5.x 兼容的 config。
+
+    apply_mark: 是否给出站连接打防火墙标记(SO_MARK)。仅在需要 iptables 全局
+        透明代理防回环时才需要，且设置该标记需要 CAP_NET_ADMIN(root)。测速等
+        纯本地 SOCKS 探测不经 iptables，不应打标记——否则无 root 权限时
+        setsockopt 会 EPERM 导致拨号失败、节点误判为"连不上"。
+    """
     stream: Dict[str, Any] = {"network": node.get("network", "tcp")}
     if node.get("network") == "ws":
         ws_opts: Dict[str, Any] = {"path": node.get("ws_path") or "/"}
@@ -101,7 +107,10 @@ def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
         sni = node.get("sni") or node.get("ws_host") or node.get("address")
         stream["tlsSettings"] = {"serverName": sni, "allowInsecure": False}
     # v2ray 发往节点的连接打防火墙标记，iptables 对该标记 RETURN，防止回环。
-    stream["sockopt"] = {"mark": SO_MARK}
+    if apply_mark:
+        stream["sockopt"] = {"mark": SO_MARK}
+
+    direct_stream: Dict[str, Any] = {"sockopt": {"mark": SO_MARK}} if apply_mark else {}
 
     return {
         "log": {"loglevel": "warning"},
@@ -157,7 +166,7 @@ def build_config(node: Dict[str, Any]) -> Dict[str, Any]:
                 "tag": "direct",
                 "protocol": "freedom",
                 "settings": {},
-                "streamSettings": {"sockopt": {"mark": SO_MARK}},
+                "streamSettings": direct_stream,
             },
         ],
         # 路由：私网/回环直连，其余走代理出站。
@@ -232,7 +241,9 @@ class ProxyManager:
             return {"ok": False, "error": "v2ray 二进制不存在"}
 
         test_socks = SOCKS_PORT + 100
-        conf = build_config(node)
+        # 测速走纯本地 SOCKS 探测，不经 iptables，无需(也不应)打 SO_MARK，
+        # 否则无 root 权限时 setsockopt 会 EPERM 导致拨号失败、误判"连不上"。
+        conf = build_config(node, apply_mark=False)
         conf["inbounds"] = [
             {
                 "tag": "socks-test",
