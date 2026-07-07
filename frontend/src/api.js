@@ -38,7 +38,7 @@ export const stopProxy = () => api('/proxy/stop', { method: 'POST' })
 
 // ---- 抓包 ----
 export const getCaptureStatus = () => api('/capture/status')
-export const startCapture = (ports) => api('/capture/start', { method: 'POST', ...jbody({ ports }) })
+export const startCapture = (ports, ignore_hosts) => api('/capture/start', { method: 'POST', ...jbody({ ports, ignore_hosts }) })
 export const stopCapture = () => api('/capture/stop', { method: 'POST' })
 export const installCA = () => api('/capture/ca/install', { method: 'POST' })
 export const uninstallCA = () => api('/capture/ca/uninstall', { method: 'POST' })

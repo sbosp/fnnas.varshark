@@ -189,6 +189,7 @@ def capture_status():
 def capture_start():
     data = request.get_json(silent=True) or {}
     ports = data.get("ports")
+    ignore_hosts = data.get("ignore_hosts")  # 可选：透传不解密的 host 正则名单
     cap = get_capture()
     if not cap.global_active():
         return jsonify(error="请先在「代理节点」页启动代理，抓包是全局代理之上的叠加",
@@ -196,7 +197,7 @@ def capture_start():
     if not cap.ca_installed_in_system():
         return jsonify(error="系统 CA 未安装，无法解密 HTTPS。请先调用 /capture/ca/install",
                        need_ca=True), 409
-    res = cap.start_capture(ports)
+    res = cap.start_capture(ports, ignore_hosts=ignore_hosts)
     if res.get("ok"):
         sid = get_db().start_session(scope=f"ports={ports or cap.ports}")
         get_db().set_setting("current_session", sid)

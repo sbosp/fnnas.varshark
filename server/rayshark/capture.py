@@ -34,6 +34,20 @@ PROC_NAME = "mitmdump"
 CHAIN = "RAYSHARK_OUT"
 DEFAULT_MITM_PORT = 8080
 DEFAULT_PORTS = [80, 443]
+# 默认忽略(透传不解密)的 host 正则：这些客户端多带自有 CA / 证书固定(pinning)，
+# 被 mitm 重签证书会 TLS 失败导致"加载失败/网络不通"。透传后直连原始目标、
+# 既不断网也不出现在抓包列表。用户可在此基础上增删。
+# 说明：--ignore-hosts 是对 "host:port" 做 re.search，故用宽松子串式正则即可。
+DEFAULT_IGNORE_HOSTS = [
+    r"fnnas\.com",       # 飞牛官方主域(应用中心/账号/更新)
+    r"fnnas\.cn",
+    r"fnos\.com",
+    r"fnos\.cn",
+    r"trim\.cn",         # 飞牛旧域/CDN
+    r"apple\.com",       # 系统类证书固定服务，避免误伤
+    r"icloud\.com",
+    r"googleapis\.com",
+]
 # 私网/回环/链路本地：这些目的地一律直连，不进代理也不抓包
 PRIVATE_NETS = (
     "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
@@ -59,6 +73,8 @@ class CaptureManager:
         self.transparent_port = transparent_port  # v2ray dokodemo 透明入站口
         self.mitm_port = DEFAULT_MITM_PORT
         self.ports = list(DEFAULT_PORTS)
+        # 透传(不解密)的 host 正则名单，防止对证书固定客户端(如飞牛应用中心)断网
+        self.ignore_hosts = list(DEFAULT_IGNORE_HOSTS)
         self.confdir = os.path.join(var_dir, "mitmproxy")
         os.makedirs(self.confdir, exist_ok=True)
         # 两个独立开关，共同决定 iptables 链形态：
@@ -190,18 +206,30 @@ class CaptureManager:
             # 3) 私网/回环/组播直连
             for net in PRIVATE_NETS:
                 _run(["iptables", "-t", "nat", "-A", CHAIN, "-d", net, "-j", "RETURN"])
+            # 3.5) DNS(53) 一律直连，绝不导入透明口。
+            #   关键防环：v2ray 解析节点域名发出的 DNS 若被抓回透明口，会与自身
+            #   无限打转，直接吃满 CPU。DNS 交给系统 resolver 直连即可(节点通常用
+            #   IP；即便用域名，此处直连解析后 v2ray 再按 IP 出海，不会回环)。
+            _run(["iptables", "-t", "nat", "-A", CHAIN,
+                  "-p", "udp", "--dport", "53", "-j", "RETURN"])
+            _run(["iptables", "-t", "nat", "-A", CHAIN,
+                  "-p", "tcp", "--dport", "53", "-j", "RETURN"])
             # 4) 抓包叠加：80/443 先转 mitm 解密（mitm 上游请求已在第 2 步放行）
             if self._capture_on:
                 for port in self.ports:
                     _run(["iptables", "-t", "nat", "-A", CHAIN,
                           "-p", "tcp", "--dport", str(port),
                           "-j", "REDIRECT", "--to-ports", str(self.mitm_port)])
-            # 5) 全局接管：其余 tcp/udp 全部导入 v2ray 透明入站
+            # 5) 全局接管：TCP 全部导入 v2ray 透明入站。
+            #   UDP 只导 443(QUIC/HTTP3)——其余 UDP(NTP/mDNS/游戏等)直连，避免
+            #   把大量无需代理的 UDP 卷进 dokodemo-door 造成空转与高负载。
             if self._global_on:
-                for proto in ("tcp", "udp"):
-                    _run(["iptables", "-t", "nat", "-A", CHAIN,
-                          "-p", proto,
-                          "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
+                _run(["iptables", "-t", "nat", "-A", CHAIN,
+                      "-p", "tcp",
+                      "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
+                _run(["iptables", "-t", "nat", "-A", CHAIN,
+                      "-p", "udp", "--dport", "443",
+                      "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
             # OUTPUT 挂唯一跳转
             _run(["iptables", "-t", "nat", "-A", "OUTPUT", "-j", CHAIN])
             return {
@@ -298,6 +326,12 @@ class CaptureManager:
             "-s", self.addon_path,
             "-q",  # 安静，日志由 addon/后端管
         ]
+        # 忽略名单：匹配的 host 透传不解密(TCP 直连转发)，避免证书固定客户端
+        # (飞牛应用中心等)因 mitm 重签证书而 TLS 失败断网。mitmproxy 接受多个
+        # --ignore-hosts，各自是对 "host:port" 的正则。
+        for pat in self.ignore_hosts:
+            if pat and pat.strip():
+                argv += ["--ignore-hosts", pat.strip()]
         # 注意：不再用 --mode upstream。mitm 解密后的上游请求以 rayshark 用户
         # 发出，会重新经过 iptables 链，被第 5 条规则导入 v2ray 透明入站出海，
         # 从而天然实现“抓包 + 全局代理”叠加，无需 mitm 自己接上游。
@@ -316,17 +350,28 @@ class CaptureManager:
         return get_procman().stop(PROC_NAME)
 
     # ---------------- 会话编排 ----------------
-    def start_capture(self, ports: Optional[List[int]] = None) -> Dict[str, Any]:
+    def start_capture(self, ports: Optional[List[int]] = None,
+                      ignore_hosts: Optional[List[str]] = None) -> Dict[str, Any]:
         """在全局代理之上叠加抓包：起 mitm 进程 + 把 80/443 REDIRECT 到 mitm。
 
         前提是全局代理已开（_global_on）。若未开则拒绝，避免只抓不出海的
         半截链路让用户困惑。
+
+        ignore_hosts: 透传(不解密)的 host 正则名单。默认含飞牛官方域名，避免
+            证书固定客户端(应用中心)被 mitm 断网。传入则覆盖默认名单。
         """
         if not self._global_on:
             return {"ok": False, "error": "请先启动代理（全局代理未开启，无法叠加抓包）",
                     "need_global": True}
         if ports:
             self.ports = ports
+        if ignore_hosts is not None:
+            # 覆盖：始终并入内置飞牛域名，避免用户误删导致应用中心又断网
+            merged = list(DEFAULT_IGNORE_HOSTS)
+            for h in ignore_hosts:
+                if h and h.strip() and h.strip() not in merged:
+                    merged.append(h.strip())
+            self.ignore_hosts = merged
         r1 = self.start_mitm()
         if not r1.get("ok"):
             return {"ok": False, "stage": "mitm", "detail": r1}
@@ -359,6 +404,7 @@ class CaptureManager:
             "global_active": self.global_active(),
             "capture_on": self._capture_on,
             "transparent_port": self.transparent_port,
+            "ignore_hosts": self.ignore_hosts,
         }
 
 

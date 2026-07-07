@@ -9,11 +9,18 @@ const st = ref({})
 const msg = ref('')
 const loading = ref(false)
 const ports = ref('80,443')
+const ignoreHosts = ref('')      // 用户自定义追加的忽略域名(每行一个)
+const ignoreSynced = ref(false)  // 只在首次同步一次后端默认名单，避免覆盖用户输入
 const log = ref('')
 let timer = null
 
 async function refresh() {
   st.value = await getCaptureStatus()
+  // 首次把后端当前(含内置飞牛域名)的忽略名单回填到编辑框，供用户增删
+  if (!ignoreSynced.value && Array.isArray(st.value.ignore_hosts)) {
+    ignoreHosts.value = st.value.ignore_hosts.join('\n')
+    ignoreSynced.value = true
+  }
 }
 onMounted(() => { refresh(); timer = setInterval(refresh, 3000) })
 onUnmounted(() => clearInterval(timer))
@@ -40,7 +47,8 @@ async function doStart() {
   loading.value = true
   try {
     const arr = ports.value.split(',').map(x => parseInt(x.trim())).filter(Boolean)
-    const r = await startCapture(arr)
+    const ign = ignoreHosts.value.split('\n').map(x => x.trim()).filter(Boolean)
+    const r = await startCapture(arr, ign)
     if (r.ok) flash('抓包已启动 ✓')
     else if (r.need_global) flash('请先到「代理节点」页启动代理')
     else if (r.need_ca) flash('请先安装系统 CA')
@@ -91,6 +99,16 @@ async function loadLog() {
       <span>抓取的目标端口（逗号分隔，抓 NAS 本机出站）</span>
       <input v-model="ports" placeholder="80,443">
     </label>
+    <label class="field" style="max-width:480px;margin-top:12px">
+      <span>忽略域名 · 透传不解密（每行一个，正则/子串匹配 host）</span>
+      <textarea v-model="ignoreHosts" rows="5" class="ta"
+        placeholder="fnnas\.com&#10;fnos\.com"></textarea>
+    </label>
+    <p class="muted" style="margin:-4px 0 12px;max-width:560px">
+      ⚠️ 应用中心、系统更新等客户端<b>自带证书校验（证书固定）</b>，不认 RayShark 的 CA，
+      被解密就会「加载失败/网络不通」。列在这里的域名会<b>透传直连、不解密、不出现在抓包列表</b>，
+      从而不影响这些功能。<b>飞牛官方域名已内置并强制保留</b>（即使删掉也会自动加回）。
+    </p>
     <div class="row">
       <button class="btn primary" v-if="!st.alive" @click="doStart" :disabled="loading || !canCapture">开始抓包</button>
       <button class="btn danger" v-else @click="doStop" :disabled="loading">停止抓包</button>
@@ -101,7 +119,8 @@ async function loadLog() {
     <p class="muted" style="margin-top:10px">
       抓包是<b>叠加在全局代理之上</b>的：开启代理后本机出站已整体走 v2ray，抓包再把
       <b>80/443</b> 先经 mitmproxy 解密成明文、再复入链路走节点出海。停止抓包不影响全局代理，
-      内网与本地地址已自动排除。开始后到「流量」页查看实时明文。
+      内网与本地地址已自动排除。<b>忽略名单里的域名会透传不解密</b>，用于放行证书固定客户端
+      （如应用中心）。开始后到「流量」页查看实时明文。
     </p>
   </div>
 
@@ -124,4 +143,9 @@ code { background: #f2f3f5; padding: 1px 5px; border-radius: 4px; font-size: 12p
   white-space: pre-wrap; word-break: break-all;
 }
 a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.ta {
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.6;
+  padding: 8px 10px; border: 1px solid var(--border, #e5e6eb); border-radius: 8px;
+  resize: vertical; width: 100%; box-sizing: border-box;
+}
 </style>

@@ -114,6 +114,12 @@ def build_config(node: Dict[str, Any], apply_mark: bool = True) -> Dict[str, Any
 
     return {
         "log": {"loglevel": "warning"},
+        # 内建 DNS：v2ray 解析目标域名时用这里的服务器，经 direct 出站(带 mark)
+        # 直连查询，不依赖系统 resolver，避免解析流量被 iptables 抓回透明口回环。
+        "dns": {
+            "servers": ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"],
+            "queryStrategy": "UseIPv4",
+        },
         "inbounds": [
             {
                 "tag": "socks-in",
@@ -169,10 +175,22 @@ def build_config(node: Dict[str, Any], apply_mark: bool = True) -> Dict[str, Any
                 "streamSettings": direct_stream,
             },
         ],
-        # 路由：私网/回环直连，其余走代理出站。
+        # 路由：DNS 查询与私网/回环直连，其余走代理出站。
         "routing": {
             "domainStrategy": "AsIs",
             "rules": [
+                {
+                    # v2ray 内建 DNS 产生的查询走 direct(带 mark)直连，防回环
+                    "type": "field",
+                    "protocol": ["dns"],
+                    "outboundTag": "direct",
+                },
+                {
+                    # 兜底：任何发往 53 端口的流量也直连
+                    "type": "field",
+                    "port": 53,
+                    "outboundTag": "direct",
+                },
                 {
                     "type": "field",
                     "ip": [
