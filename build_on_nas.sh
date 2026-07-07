@@ -31,13 +31,15 @@
 #   SMOKE=1 ./build_on_nas.sh         # 打完额外冒烟启动一次二进制做自检(推荐首次用)
 #   PY=/var/apps/pythonX/target/bin/python3 ./build_on_nas.sh   # 手动指定构建用 python3
 #   SKIP_BINARIES=1 ./build_on_nas.sh # bin/ 里已有 v2ray+mitmdump，跳过下载
-#   REBUILD_FRONTEND=1 ./build_on_nas.sh  # 强制重建前端(默认：包内无产物时也会自动构建)
+#   REBUILD_FRONTEND=1 ./build_on_nas.sh  # 强制重建前端
+#   REBUILD_FRONTEND=0 ./build_on_nas.sh  # 强制复用包内已有 app/ui 产物(跳过重建)
+#   (默认：有 frontend/ 源码且有 npm 时自动按源码重建，确保前端改动一定生效)
 #
 # 前置条件：
 #   - 一个可用的 python3 (>=3.8，能 pip install / venv)。飞牛可在应用中心装 "Python"，
 #     其路径通常在 /var/apps/python*/target/bin/python3。脚本会自动探测。
-#   - node/npm：仅当 app/ui 无已构建产物(或 REBUILD_FRONTEND=1)时需要，脚本会自动
-#     npm install + npm run build。若已随包 app/ui 产物则无需 node。
+#   - node/npm：有 frontend/ 源码时默认据其重建前端(自动 npm install + npm run build)。
+#     无 npm 时回落复用随包 app/ui 产物；两者皆无则报错。
 #   - 已安装飞牛打包工具 fnpack（fnOS 开发者环境自带）。
 #   - 网络可访问 pypi 与 github(下载 pyinstaller/gevent 及随包二进制)。
 ###############################################################################
@@ -58,7 +60,7 @@ VENV_DIR="${HERE}/.build-venv"
 PYI_WORK="${HERE}/.pyi-build"           # PyInstaller build/dist/spec 的临时工作区
 
 SKIP_BINARIES="${SKIP_BINARIES:-0}"
-REBUILD_FRONTEND="${REBUILD_FRONTEND:-0}"
+REBUILD_FRONTEND="${REBUILD_FRONTEND:-}"   # 空=自动(有源码+npm则重建)；1=强制重建；0=强制复用
 SMOKE="${SMOKE:-0}"
 
 # pip 源：默认清华镜像(国内 NAS 快且稳)；可用 PIP_INDEX_URL=... 覆盖回官方源
@@ -160,15 +162,35 @@ info "==> [4/7] 前端静态资源 -> app/ui"
 UI_DIR="${PKG_DIR}/app/ui"
 HAS_UI=0
 [ -f "${UI_DIR}/index.html" ] && [ -d "${UI_DIR}/assets" ] && HAS_UI=1
-# 何时构建：显式 REBUILD_FRONTEND=1，或包内还没有已构建产物
-if [ "${REBUILD_FRONTEND}" = "1" ] || [ "${HAS_UI}" != "1" ]; then
-    command -v npm >/dev/null 2>&1 \
-        || die "app/ui 缺少已构建前端且未找到 npm。请安装 Node(应用中心/nvm)，或在有 node 的机器上先构建后再拷入 ${UI_DIR}。"
-    [ -d "${HERE}/frontend" ] || die "未找到前端源码目录 ${HERE}/frontend。"
-    if [ "${HAS_UI}" != "1" ]; then
-        info "    app/ui 无已构建产物，自动构建前端"
+HAS_SRC=0
+[ -d "${HERE}/frontend" ] && HAS_SRC=1
+HAS_NPM=0
+command -v npm >/dev/null 2>&1 && HAS_NPM=1
+
+# 决策：源码是唯一真相。只要有 frontend/ 源码且有 npm，就默认重建，
+# 避免"包内残留旧产物→复用旧产物→源码改动不生效"的坑(git 里 app/ui 常带旧产物)。
+# 仅当无 npm 时才回落复用已有产物；REBUILD_FRONTEND=0 可显式跳过重建强制复用。
+DO_BUILD=0
+if [ "${REBUILD_FRONTEND}" = "1" ]; then
+    DO_BUILD=1                                   # 显式强制重建
+elif [ "${REBUILD_FRONTEND}" = "0" ] && [ "${HAS_UI}" = "1" ]; then
+    DO_BUILD=0                                   # 显式禁用+已有产物→复用
+elif [ "${HAS_SRC}" = "1" ] && [ "${HAS_NPM}" = "1" ]; then
+    DO_BUILD=1                                   # 有源码+有 npm→默认重建(源码为准)
+elif [ "${HAS_UI}" = "1" ]; then
+    DO_BUILD=0                                   # 无 npm 但有现成产物→回落复用
+else
+    die "app/ui 无已构建前端且未找到 npm。请安装 Node(应用中心/nvm)，或在有 node 的机器上先构建后拷入 ${UI_DIR}。"
+fi
+
+if [ "${DO_BUILD}" = "1" ]; then
+    [ "${HAS_NPM}" = "1" ] \
+        || die "需要重建前端但未找到 npm。请安装 Node，或设 REBUILD_FRONTEND=0 复用已有产物。"
+    [ "${HAS_SRC}" = "1" ] || die "未找到前端源码目录 ${HERE}/frontend。"
+    if [ "${REBUILD_FRONTEND}" = "1" ]; then
+        info "    REBUILD_FRONTEND=1，强制重建前端"
     else
-        info "    REBUILD_FRONTEND=1，重建前端"
+        info "    检测到前端源码，按源码重建前端(如需复用旧产物用 REBUILD_FRONTEND=0)"
     fi
     ( cd "${HERE}/frontend" \
       && { [ -d node_modules ] || { info "    安装 npm 依赖(node_modules 缺失)"; npm install; }; } \
