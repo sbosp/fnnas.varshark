@@ -59,6 +59,10 @@ SKIP_BINARIES="${SKIP_BINARIES:-0}"
 REBUILD_FRONTEND="${REBUILD_FRONTEND:-0}"
 SMOKE="${SMOKE:-0}"
 
+# pip 源：默认清华镜像(国内 NAS 快且稳)；可用 PIP_INDEX_URL=... 覆盖回官方源
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 info()  { printf '\033[36m%s\033[0m\n' "$*"; }
@@ -119,12 +123,14 @@ if [ ! -d "${VENV_DIR}" ]; then
     "${PYBIN}" -m venv "${VENV_DIR}" || die "创建 venv 失败"
 fi
 VPY="${VENV_DIR}/bin/python"
-"${VPY}" -m pip install --upgrade pip wheel setuptools >/dev/null 2>&1 || info "    (pip 升级跳过)"
+PIP_OPTS="-i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST}"
+info "    pip 源: ${PIP_INDEX_URL}"
+"${VPY}" -m pip install ${PIP_OPTS} --upgrade pip wheel setuptools >/dev/null 2>&1 || info "    (pip 升级跳过)"
 info "    安装后端依赖: flask / gevent / gevent-websocket"
-"${VPY}" -m pip install -r "${SRC_SERVER}/requirements.txt" \
+"${VPY}" -m pip install ${PIP_OPTS} -r "${SRC_SERVER}/requirements.txt" \
     || die "pip 安装后端依赖失败(检查网络/pypi 源；gevent 需 aarch64 wheel)"
 info "    安装 pyinstaller"
-"${VPY}" -m pip install "pyinstaller>=6.0" \
+"${VPY}" -m pip install ${PIP_OPTS} "pyinstaller>=6.0" \
     || die "pip 安装 pyinstaller 失败"
 green "    依赖就绪"
 
