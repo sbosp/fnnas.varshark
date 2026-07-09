@@ -27,7 +27,9 @@ onUnmounted(() => clearInterval(timer))
 
 function flash(t) { msg.value = t; setTimeout(() => { if (msg.value === t) msg.value = '' }, 4000) }
 
-const canCapture = computed(() => st.value.binary && st.value.ca_in_system && st.value.global_active)
+// 抓包独立于代理：只要有 mitmdump 二进制 + 系统 CA 即可抓包。
+// 未开代理时解密后直连出海；已开代理时解密后再走节点。
+const canCapture = computed(() => st.value.binary && st.value.ca_in_system)
 
 async function doInstallCA() {
   loading.value = true
@@ -50,7 +52,6 @@ async function doStart() {
     const ign = ignoreHosts.value.split('\n').map(x => x.trim()).filter(Boolean)
     const r = await startCapture(arr, ign)
     if (r.ok) flash('抓包已启动 ✓')
-    else if (r.need_global) flash('请先到「代理节点」页启动代理')
     else if (r.need_ca) flash('请先安装系统 CA')
     else flash('启动失败：' + JSON.stringify(r.detail || r.error || r))
     await refresh()
@@ -77,6 +78,9 @@ async function loadLog() {
       <div><span class="muted">iptables 重定向</span><br><span class="tag" :class="st.iptables_active ? 'ok' : 'off'">{{ st.iptables_active ? '生效' : '未生效' }}</span></div>
       <div><span class="muted">抓包进程</span><br><span class="tag" :class="st.alive ? 'ok' : 'off'">{{ st.alive ? '抓取中' : '已停止' }}</span></div>
     </div>
+    <p v-if="st.alive" class="muted" style="margin:10px 0 0;font-size:12px">
+      当前抓包出海方式：<b>{{ st.global_active ? '解密后经节点出海（叠加全局代理）' : '解密后直连出海（未走节点）' }}</b>
+    </p>
     <div v-if="msg" class="msg">{{ msg }}</div>
   </div>
 
@@ -113,14 +117,14 @@ async function loadLog() {
       <button class="btn primary" v-if="!st.alive" @click="doStart" :disabled="loading || !canCapture">开始抓包</button>
       <button class="btn danger" v-else @click="doStop" :disabled="loading">停止抓包</button>
       <span v-if="!canCapture" class="muted">
-        {{ !st.global_active ? '需先到「代理节点」页启动代理；' : '' }}{{ !st.binary ? '需先安装 mitmdump 二进制；' : '' }}{{ !st.ca_in_system ? '需先安装系统 CA。' : '' }}
+        {{ !st.binary ? '需先安装 mitmdump 二进制；' : '' }}{{ !st.ca_in_system ? '需先安装系统 CA。' : '' }}
       </span>
     </div>
     <p class="muted" style="margin-top:10px">
-      抓包是<b>叠加在全局代理之上</b>的：开启代理后本机出站已整体走 v2ray，抓包再把
-      <b>80/443</b> 先经 mitmproxy 解密成明文、再复入链路走节点出海。停止抓包不影响全局代理，
-      内网与本地地址已自动排除。<b>忽略名单里的域名会透传不解密</b>，用于放行证书固定客户端
-      （如应用中心）。开始后到「流量」页查看实时明文。
+      抓包与代理<b>相互独立</b>，可单独开启。抓包会把 <b>80/443</b> 先经 mitmproxy 解密成明文再放行：
+      <b>未开代理</b>时解密后<b>直连出海</b>（不走节点，仅本机看明文）；<b>已开全局代理</b>时解密后
+      <b>再复入链路走节点出海</b>。停止抓包不影响代理，反之亦然。内网与本地地址已自动排除，
+      <b>忽略名单里的域名会透传不解密</b>（放行应用中心等证书固定客户端）。开始后到「流量」页查看实时明文。
     </p>
   </div>
 

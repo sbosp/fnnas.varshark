@@ -168,10 +168,11 @@ def proxy_start():
 
 @bp.post("/proxy/stop")
 def proxy_stop():
-    # 先撤销全局 iptables 接管（同时会关掉叠加的抓包），再停 v2ray。
-    # 顺序很重要：否则先停 v2ray 会导致透明口失效、被接管的流量黑洞。
+    # 仅撤销全局 iptables 接管，再停 v2ray。代理与抓包相互独立：
+    # 若抓包仍在运行，disable_global 会保留它并自动转为直连抓包模式，
+    # 不再顺带停 mitm。顺序仍重要：先撤全局重定向再停 v2ray，否则先停
+    # v2ray 会导致透明口失效、被接管的流量黑洞。
     cap = get_capture()
-    cap.stop_mitm()          # 幂等：抓包没开也安全
     gres = cap.disable_global()
     res = get_proxy().stop()
     res["global"] = gres
@@ -191,9 +192,7 @@ def capture_start():
     ports = data.get("ports")
     ignore_hosts = data.get("ignore_hosts")  # 可选：透传不解密的 host 正则名单
     cap = get_capture()
-    if not cap.global_active():
-        return jsonify(error="请先在「代理节点」页启动代理，抓包是全局代理之上的叠加",
-                       need_global=True), 409
+    # 抓包与代理相互独立：未开代理也可抓包（解密后直连出海，不经节点）。
     if not cap.ca_installed_in_system():
         return jsonify(error="系统 CA 未安装，无法解密 HTTPS。请先调用 /capture/ca/install",
                        need_ca=True), 409

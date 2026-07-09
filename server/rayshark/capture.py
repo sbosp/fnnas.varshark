@@ -169,15 +169,27 @@ class CaptureManager:
     def _rebuild_chain(self) -> Dict[str, Any]:
         """按当前 (global_on, capture_on) 两个标志，原子重建整条 RAYSHARK_OUT 链。
 
-        规则顺序（命中即止，靠 RETURN/REDIRECT 短路）：
-          1. 带 SO_MARK(v2ray 自身出海流量) -> RETURN     防代理流量回环
-          2. mitm 运行用户的出站          -> RETURN       防抓包解密后上游请求回环
-          3. 私网/回环/组播目的地          -> RETURN       内网与本机直连
-          4. [抓包开] tcp 80/443          -> REDIRECT mitm 端口   叠加解密
-          5. [全局开] 其余 tcp/udp         -> REDIRECT v2ray 透明口  全局接管
+        代理与抓包完全独立，四象限组合都成立（命中即止，靠 RETURN/REDIRECT 短路）：
+
+          1. 带 SO_MARK(v2ray 自身出海流量)      -> RETURN            防代理流量回环
+          2. 私网/回环/组播目的地                 -> RETURN            内网与本机直连
+          3. DNS(53) tcp/udp                     -> RETURN            防 DNS 回环
+          4. 目标端口=透明口/mitm 口              -> RETURN            防 redirect-to-self 级联
+          5. [抓包开] mitm 运行用户(rayshark)出站:
+               · 全局也开  -> REDIRECT v2ray 透明口   解密后的上游再走节点(叠加)
+               · 仅抓包    -> RETURN                  解密后直连出海(不走节点)
+             (必须在第 6 条之前，否则 mitm 的上游 80/443 会被重定向回 mitm 自身 → 死循环)
+          6. [抓包开] tcp 80/443                  -> REDIRECT mitm 端口   解密抓包
+          7. [全局开] tcp catch-all               -> REDIRECT v2ray 透明口  全局接管
+          8. [全局开] udp 443(QUIC)               -> REDIRECT v2ray 透明口
+
+        四象限：
+          - 都关          : 不建链，全直连
+          - 仅全局代理     : 7/8 生效，整机 tcp/udp443 走节点
+          - 仅抓包        : 5(RETURN)+6 生效，80/443 解密后直连出海(不经节点)
+          - 全局+抓包      : 5(REDIRECT)+6+7/8 生效，80/443 解密后再走节点，其余走节点
 
         全部规则挂自定义链，OUTPUT 仅一条 -j 跳转；关闭时整链删除干净回滚。
-        capture_on 为真时必须 global_on 也为真（抓包是全局代理之上的叠加）。
         """
         if not self._iptables_available():
             return {"ok": False, "error": "iptables 不可用"}
@@ -201,13 +213,10 @@ class CaptureManager:
             # 1) 放行 v2ray 自身出海（按 fwmark），这是防回环的第一道闸
             _run(["iptables", "-t", "nat", "-A", CHAIN,
                   "-m", "mark", "--mark", str(SO_MARK), "-j", "RETURN"])
-            # 2) 放行 mitm 运行用户的出站（解密后走 v2ray 时不再被 mitm 截获）
-            _run(["iptables", "-t", "nat", "-A", CHAIN,
-                  "-m", "owner", "--uid-owner", MITM_USER, "-j", "RETURN"])
-            # 3) 私网/回环/组播直连
+            # 2) 私网/回环/组播直连
             for net in PRIVATE_NETS:
                 _run(["iptables", "-t", "nat", "-A", CHAIN, "-d", net, "-j", "RETURN"])
-            # 3.5) DNS(53) 一律直连，绝不导入透明口。
+            # 3) DNS(53) 一律直连，绝不导入透明口。
             #   关键防环：v2ray 解析节点域名发出的 DNS 若被抓回透明口，会与自身
             #   无限打转，直接吃满 CPU。DNS 交给系统 resolver 直连即可(节点通常用
             #   IP；即便用域名，此处直连解析后 v2ray 再按 IP 出海，不会回环)。
@@ -215,18 +224,32 @@ class CaptureManager:
                   "-p", "udp", "--dport", "53", "-j", "RETURN"])
             _run(["iptables", "-t", "nat", "-A", CHAIN,
                   "-p", "tcp", "--dport", "53", "-j", "RETURN"])
-            # 3.6) 防自环兜底：任何目标端口本身就是透明口/mitm 口的包一律直连，
+            # 4) 防自环兜底：任何目标端口本身就是透明口/mitm 口的包一律直连，
             #   绝不再重定向到透明口自身（杜绝 redirect-to-self 级联）。
             for self_port in (self.transparent_port, self.mitm_port):
                 _run(["iptables", "-t", "nat", "-A", CHAIN,
                       "-p", "tcp", "--dport", str(self_port), "-j", "RETURN"])
-            # 4) 抓包叠加：80/443 先转 mitm 解密（mitm 上游请求已在第 2 步放行）
+            # 5) mitm 运行用户(rayshark)的出站——决定"抓包解密后的流量走哪"：
+            #   · 全局代理也开 -> 重定向到 v2ray 透明口，解密后的上游请求再走节点(叠加)
+            #   · 仅抓包       -> 直接 RETURN，解密后的上游请求直连出海(不经节点)
+            #   无论哪种，都必须排在第 6 条(80/443→mitm)之前，否则 mitm 自己发出的
+            #   上游 80/443 会被第 6 条又重定向回 mitm，形成死循环。
+            #   仅在抓包开启时才需要这条（mitm 进程此时才存在）。
+            if self._capture_on:
+                if self._global_on:
+                    _run(["iptables", "-t", "nat", "-A", CHAIN,
+                          "-m", "owner", "--uid-owner", MITM_USER,
+                          "-p", "tcp",
+                          "-j", "REDIRECT", "--to-ports", str(self.transparent_port)])
+                _run(["iptables", "-t", "nat", "-A", CHAIN,
+                      "-m", "owner", "--uid-owner", MITM_USER, "-j", "RETURN"])
+            # 6) 抓包：80/443 先转 mitm 解密（mitm 自身上游已在第 5 步处理）
             if self._capture_on:
                 for port in self.ports:
                     _run(["iptables", "-t", "nat", "-A", CHAIN,
                           "-p", "tcp", "--dport", str(port),
                           "-j", "REDIRECT", "--to-ports", str(self.mitm_port)])
-            # 5) 全局接管：TCP 全部导入 v2ray 透明入站。
+            # 7) 全局接管：TCP 全部导入 v2ray 透明入站。
             #   UDP 只导 443(QUIC/HTTP3)——其余 UDP(NTP/mDNS/游戏等)直连，避免
             #   把大量无需代理的 UDP 卷进 dokodemo-door 造成空转与高负载。
             if self._global_on:
@@ -290,9 +313,12 @@ class CaptureManager:
         return self._rebuild_chain()
 
     def disable_global(self) -> Dict[str, Any]:
-        """关闭全局代理。同时会关掉抓包（抓包依赖全局链存在）。"""
+        """关闭全局代理。抓包（若在运行）保留，自动转为直连抓包模式。
+
+        代理与抓包完全独立：关代理只翻转 global 标志重建链，若 capture 仍开，
+        重建后 mitm 上游改走 RETURN(直连出海)，抓包继续工作。
+        """
         self._global_on = False
-        self._capture_on = False
         return self._rebuild_chain()
 
     def global_active(self) -> bool:
@@ -376,17 +402,16 @@ class CaptureManager:
     # ---------------- 会话编排 ----------------
     def start_capture(self, ports: Optional[List[int]] = None,
                       ignore_hosts: Optional[List[str]] = None) -> Dict[str, Any]:
-        """在全局代理之上叠加抓包：起 mitm 进程 + 把 80/443 REDIRECT 到 mitm。
+        """开启抓包：起 mitm 进程 + 把 80/443 REDIRECT 到 mitm。
 
-        前提是全局代理已开（_global_on）。若未开则拒绝，避免只抓不出海的
-        半截链路让用户困惑。
+        代理与抓包完全独立，抓包不依赖全局代理：
+          - 未开全局代理时：解密后的上游请求直连出海（明文抓到，但不走节点）；
+          - 已开全局代理时：解密后的上游请求再经 v2ray 走节点（叠加）。
+        由 _rebuild_chain 依 (global_on, capture_on) 自动决定 mitm 上游的走向。
 
         ignore_hosts: 透传(不解密)的 host 正则名单。默认含飞牛官方域名，避免
             证书固定客户端(应用中心)被 mitm 断网。传入则覆盖默认名单。
         """
-        if not self._global_on:
-            return {"ok": False, "error": "请先启动代理（全局代理未开启，无法叠加抓包）",
-                    "need_global": True}
         if ports:
             self.ports = ports
         if ignore_hosts is not None:

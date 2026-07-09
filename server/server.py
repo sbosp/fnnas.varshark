@@ -99,12 +99,14 @@ def main() -> int:
 
     def _shutdown(*_a):
         log.info("shutting down")
-        # 关键：先撤销 iptables 全局接管，否则进程停了、链还在，
-        # 会把本机全部出站重定向到已死的 v2ray 端口 -> NAS 断网。
+        # 关键：先彻底清空 iptables 链（含全局接管 + 抓包重定向），否则进程停了、
+        # 链还在，会把本机出站重定向到已死的 v2ray/mitm 端口 -> NAS 断网。
+        # 代理与抓包已解耦，任一开启都可能留下指向死端口的规则，故用 _flush_chain
+        # 整链清除（比 disable_global 更彻底，也会恢复 IPv6）。
         try:
-            get_capture().disable_global()
+            get_capture()._flush_chain(silent=True)
         except Exception as e:  # noqa: BLE001
-            log.warning("disable_global on shutdown failed: %s", e)
+            log.warning("flush_chain on shutdown failed: %s", e)
         try:
             get_procman().stop_all()
         except Exception as e:  # noqa: BLE001

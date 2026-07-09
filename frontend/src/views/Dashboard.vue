@@ -80,7 +80,7 @@ const capOn = computed(() => ov.value?.capture?.alive)
     <h2>快速开始</h2>
     <ol class="muted" style="line-height:2;padding-left:18px;margin:0">
       <li>到 <b>代理节点</b> 添加 VMess 节点（支持粘贴 vmess:// 链接），启动代理 —— 本机出站将<b>整体走 v2ray 全局代理</b></li>
-      <li>（可选）到 <b>抓包</b> 页安装系统 CA，开启抓包 —— 在全局代理之上叠加解密 80/443</li>
+      <li>到 <b>抓包</b> 页安装系统 CA、开启抓包 —— 与代理<b>相互独立</b>：未开代理时解密后直连出海（仅看明文），已开代理时解密后再走节点</li>
       <li>到 <b>流量</b> 页实时查看 NAS 本机出站请求的明文内容</li>
     </ol>
   </div>
